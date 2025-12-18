@@ -1,12 +1,30 @@
-import { createClient } from 'npm:@supabase/supabase-js'
-import cards from '../data/cards.json' assert { type: 'json' }
+import { createClient } from '@supabase/supabase-js'
+import cards from './cards.json' with { type: 'json' }
+import 'dotenv/config' 
 
-
-console.log(cards)
+const SUPABASE_URL = "https://ynhdlnqtzbolovuaxcqx.supabase.co"
 
 const supabase = createClient(
-  process.env.EXPO_PUBLIC_SUPABASE_URL,
-  process.env.EXPO_PUBLIC_SUPABASE_KEY,
+ SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
 )
 
 
+async function seed() {
+
+    for (const card of cards) {
+        const { data, error } = await supabase
+            .from('cards')
+            .insert(card)
+            .select();
+
+        if (error) {
+            console.error('Error inserting data:', error);
+        } else {
+            console.log('Data inserted successfully:', data[0].name);
+        }
+    }
+
+}
+
+seed();
