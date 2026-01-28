@@ -1,4 +1,4 @@
-[
+﻿[
   {
     "card_id": "OP01-001",
     "name": "Roronoa Zoro",
@@ -13,7 +13,8 @@
     "effect": "[Activate: Main] [Once Per Turn] Draw 1 card.",
     "image_url": "https://limitlesstcg.s3.us-east-2.amazonaws.com/one-piece/op01/op01-001.png",
     "variations": ["normal"],
-    "language": "EN"
+    "language": "EN",
+    "price": 12.50
   },
   {
     "card_id": "OP05-060",
@@ -29,7 +30,8 @@
     "effect": "[On Play] K.O. up to 1 of your opponent's Characters with 4000 power or less.",
     "image_url": "https://limitlesstcg.s3.us-east-2.amazonaws.com/one-piece/op05/op05-060.png",
     "variations": ["foil"],
-    "language": "EN"
+    "language": "EN",
+    "price": 45.00
   },
   {
     "card_id": "OP01-002",
@@ -45,7 +47,8 @@
     "effect": "[Your Turn] All your Characters gain +1000 power.",
     "image_url": "https://limitlesstcg.s3.us-east-2.amazonaws.com/one-piece/op01/op01-002.png",
     "variations": ["normal"],
-    "language": "EN"
+    "language": "EN",
+    "price": 8.99
   },
   {
     "card_id": "OP02-001",
@@ -61,7 +64,8 @@
     "effect": "[End of Your Turn] Set up to 2 rest cards from your DON!! deck.",
     "image_url": "https://limitlesstcg.s3.us-east-2.amazonaws.com/one-piece/op02/op02-001.png",
     "variations": ["alt-art"],
-    "language": "EN"
+    "language": "EN",
+    "price": 150.00
   },
   {
     "card_id": "OP03-047",
@@ -77,7 +81,8 @@
     "effect": "[On Play] REST up to 3 of your opponent's Characters.",
     "image_url": "https://limitlesstcg.s3.us-east-2.amazonaws.com/one-piece/op03/op03-047.png",
     "variations": ["parallel"],
-    "language": "EN"
+    "language": "EN",
+    "price": 25.75
   },
   {
     "card_id": "OP04-015",
@@ -93,7 +98,8 @@
     "effect": "[On Play] Look at 5 cards from the top of your deck; reveal up to 1 DON!! card and add it to your DON!! deck.",
     "image_url": "https://limitlesstcg.s3.us-east-2.amazonaws.com/one-piece/op04/op04-015.png",
     "variations": ["normal"],
-    "language": "EN"
+    "language": "EN",
+    "price": 5.50
   },
   {
     "card_id": "OP05-001",
@@ -109,7 +115,8 @@
     "effect": "All your Characters gain +500 power.",
     "image_url": "https://limitlesstcg.s3.us-east-2.amazonaws.com/one-piece/op05/op05-001.png",
     "variations": ["normal"],
-    "language": "EN"
+    "language": "EN",
+    "price": 18.20
   },
   {
     "card_id": "OP06-035",
@@ -125,6 +132,7 @@
     "effect": "[Rush] [Once Per Turn] [Activate: Main] This character attacks your opponent.",
     "image_url": "https://limitlesstcg.s3.us-east-2.amazonaws.com/one-piece/op06/op06-035.png",
     "variations": ["foil"],
-    "language": "EN"
+    "language": "EN",
+    "price": 30.00
   }
 ]
