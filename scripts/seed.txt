@@ -1,0 +1,86 @@
+import { JustTCG } from 'justtcg-js';
+import 'dotenv/config';
+
+// ------------------------------------------------------------------
+// Types & Client
+// ------------------------------------------------------------------
+interface JustTcgPagination { page: number; limit: number; offset: number; total: number; totalPages: number; hasMore: boolean; }
+interface JustTcgResponse<T> { data: T[]; pagination: JustTcgPagination; error?: string; } 
+
+interface SetData { id: string; name: string; releaseDate: string | null; totalCards: number | null; game: string; }
+interface VariantData { id: string; printing: string; condition: string; price: number; lastUpdated: string; language: string | null; }
+interface CardData { id: string; name: string; number: string; rarity: string; set: string; game: string; variants: VariantData[]; }
+
+const client = new JustTCG({ apiKey: process.env.JUSTTCG_API_KEY! });
+
+if (!process.env.JUSTTCG_API_KEY) throw new Error("Missing JUSTTCG_API_KEY");
+
+// ------------------------------------------------------------------
+// Utilities
+// ------------------------------------------------------------------
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function fetchAll<T>(label: string, fetchFn: (offset: number) => Promise<any>): Promise<T[]> {
+  const items: T[] = [];
+  let offset = 0, hasMore = true;
+  console.log(`Fetching ${label}...`);
+  
+  while (hasMore) {
+    const res = await fetchFn(offset) as JustTcgResponse<T>;
+    if (res.error) throw new Error(`Error fetching ${label}: ${res.error}`);
+    
+    items.push(...res.data);
+    offset += res.data.length;
+    hasMore = res.pagination.hasMore;
+    if (hasMore) await sleep(200);
+  }
+  return items;
+}
+
+// ------------------------------------------------------------------
+// DB Sync
+// ------------------------------------------------------------------
+// TODO: Replace with actual Supabase/DB calls
+const upsert = async (table: string, data: any[]) => console.log(`[DB] Upserting ${data.length} rows to '${table}'`);
+
+async function sync() {
+  try {
+    // 1. Fetch & Sync Sets
+    const sets = await fetchAll<SetData>("Sets", offset => 
+      client.v1.sets.list({ game: "one-piece-card-game", limit: 50, offset }));
+
+    await upsert('sets', sets.map(s => ({
+      set_id: s.id, set_name: s.name, 
+      release_date: s.releaseDate ? new Date(s.releaseDate) : null, 
+      total_cards: s.totalCards 
+    })));
+
+    // 2. Fetch & Sync Cards + Variants per Set
+    for (const set of sets) {
+      const cards = await fetchAll<CardData>(`Cards (${set.name})`, offset => 
+        // @ts-ignore
+        client.v1.cards.list({ game: "one-piece-card-game", set: set.id, limit: 50, offset }));
+
+      await upsert('cards', cards.map(c => ({
+        card_id: c.id, name: c.name, set_id: c.set, card_number: c.number, rarity: c.rarity, language: null
+      })));
+
+      const variants = cards.flatMap(c => (c.variants || []).map(v => ({
+        variant_id: v.id, card_id: c.id, printing: v.printing, condition: v.condition,
+        language: v.language || null, market_price: v.price, last_updated: new Date(v.lastUpdated)
+      })));
+
+      // Batch upsert variants
+      for (let i = 0; i < variants.length; i += 1000) {
+        await upsert('variants', variants.slice(i, i + 1000));
+      }
+    }
+    console.log("Full sync complete.");
+
+  } catch (err) {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  }
+}
+
+if (require.main === module) sync();

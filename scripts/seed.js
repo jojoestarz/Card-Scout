@@ -1,146 +1,183 @@
-const { createClient } = require("@supabase/supabase-js");
-require("dotenv").config({ path: ".env" });
-const { JustTCG } = require("justtcg-js");
+const { JustTCG } = require('justtcg-js');
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
 
-const SUPABASE_URL = "https://ynhdlnqtzbolovuaxcqx.supabase.co";
+// ------------------------------------------------------------------
+// 1. Setup & Config
+// ------------------------------------------------------------------
 
-const supabase = createClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-let set_names = [];
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || "https://ynhdlnqtzbolovuaxcqx.supabase.co";
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.EXPO_PUBLIC_SUPABASE_KEY;
+const JUSTTCG_API_KEY = process.env.JUSTTCG_API_KEY;
 
-async function seed() {
-  // Create TCG client
-  try {
-    const client = new JustTCG({ apiKey: process.env.TCG_API_KEY });
-    const limit = 20;
-    let offset = 0;
-    let allSets = [];
-    let hasMore = true;
-
-    console.log("Starting set ingestion...");
-
-    while (hasMore) {
-      console.log(`Fetching sets with offset ${offset}...`);
-      const response = await client.v1.sets.list({
-        game: "one-piece-card-game",
-        limit,
-        offset,
-      });
-
-      if (response.error) {
-        throw new Error(
-          `API Error: ${response.error} (Code: ${response.code})`,
-        );
-      }
-
-      const { data, pagination, usage } = response;
-
-      // Log Usage Metadata
-      if (usage) {
-        console.log("--- API Usage ---");
-        console.log(
-          `Daily Requests: ${usage.apiDailyRequestsUsed}/${usage.apiDailyLimit}`,
-        );
-        console.log(`Daily Remaining: ${usage.apiDailyRequestsRemaining}`);
-        console.log(`Rate Limit Remaining: ${usage.apiRequestsRemaining}`);
-
-        if (usage.apiDailyRequestsRemaining <= 1) {
-          console.warn(
-            "⚠️ Daily request limit reached or nearly exhausted. Stopping to prevent overage.",
-          );
-          break;
-        }
-      }
-      
-      if (data && data.length > 0) {
-        allSets = allSets.concat(data);
-        offset += data.length;
-        console.log(
-          `Fetched ${data.length} sets. Total loaded so far: ${allSets.length}`,
-        );
-      }
-
-      // Handle Pagination
-      if (pagination) {
-        console.log(`Pagination Info: Current Page: ${pagination.page}, Total Pages: ${pagination.totalPages}`);
-        hasMore = pagination.hasMore;
-        if (pagination.total) {
-          console.log(
-            `Progress: ${Math.round((allSets.length / pagination.total) * 100)}% (${allSets.length}/${pagination.total})`,
-          );
-        }
-      } else {
-        hasMore = false;
-      }
-
-      if (hasMore) {
-        // Rate limit: 10 requests/minute -> 6 seconds delay
-        console.log("Waiting 6s to respect rate limit...");
-        await new Promise((resolve) => setTimeout(resolve, 6000));
-      }
-    }
-
-    console.log("\n--- Ingestion Complete ---");
-    console.log(`Total Sets Fetched: ${allSets.length}`);
-
-    // Print set names exactly once
-    console.log("\nSet Names:");
-    for (const set of allSets) {
-      set_names.push(set);
-    }
-    
-    
-  } catch (error) {
-    console.error("Error fetching sets:", error.message);
-    process.exit(1);
-  }
-  orderedSets = set_names.sort((a, b) => {
-    if (a.release_date < b.release_date)
-    {
-      return 1;
-    }
-    else
-    {
-      return -1
-    } 
-
-  })
-  for (const set of orderedSets) {
-    console.table(`${set.name} - ${set.release_date}`);
-  }
-
-  //   const base  = "https://www.optcgapi.com/api/"
-  //   console.log('fetching sets...')
-  //   const setsRequest = await fetch(`${base}allSets/`)
-  //   const sets = await setsRequest.json()
-
-  //   const { error: setError } = await supabase.from('card_set').upsert(sets);
-  // if (setError) throw new Error(`Operation Failed: ${setError.message}`);
-  // console.log(`✅ Saved ${sets.length} Sets.`);
-
-  //   const cardsRequest = await fetch(`${base}allSetCards/`)
-  //   const cards = await cardsRequest.json()
-  //   formattedCards = cards.map((card) => {
-  //       return {
-  //           card_id: card.card_set_id,
-  //           name: card.card_name,
-  //           set_id: card.set_id,
-  //           card_number: card.card_number,
-  //           rarity: card.rarity,
-  //           cost: card.card_cost,
-  //           power: card.card_power,
-  //           type: card.card_type,
-  //           colour: card.card_colour,
-  //           attribute: card.card_attribute,
-  //           effect: card.card_text,
-  //           image_url: card.image_url,
-  //           image_id: card.image_id,
-  //           variations: card.variations,
-  //           language: card.language,
-  //           price: card.
-  //       }
-  //       })
-  //       const { error: cardError } = await supabase.from('cards').upsert(cards);
-  // if (cardError) throw new Error(`Operation Failed: ${cardError.message}`);
-  // console.log(`✅ Saved ${cards.length} Cards.`);
+if (!SUPABASE_KEY) {
+  console.error("❌ Missing SUPABASE_SERVICE_KEY or EXPO_PUBLIC_SUPABASE_KEY");
+  process.exit(1);
 }
-seed();
+if (!JUSTTCG_API_KEY) {
+  console.error("❌ Missing JUSTTCG_API_KEY");
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const justTcg = new JustTCG({ apiKey: JUSTTCG_API_KEY });
+
+// ------------------------------------------------------------------
+// 2. Helpers
+// ------------------------------------------------------------------
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Generic Upsert Helper
+ * Directly sends data to Supabase and handles errors.
+ */
+async function upsertBatch(table, rows, conflictKey) {
+  if (!rows || rows.length === 0) return;
+
+  const { error } = await supabase
+    .from(table)
+    .upsert(rows, { onConflict: conflictKey });
+
+  if (error) {
+    console.error(`❌ Error upserting to ${table}:`, error.message);
+    throw error;
+  }
+}
+
+// ------------------------------------------------------------------
+// 3. Transform Functions
+// ------------------------------------------------------------------
+
+const mapSet = (set) => ({
+  set_id: set.id,
+  set_name: set.name,
+  release_date: set.releaseDate,
+});
+
+const mapCard = (card) => ({
+  card_id: card.id,
+  name: card.name,
+  set_id: card.set,
+  card_number: card.number,
+  rarity: card.rarity,
+});
+
+const mapVariants = (card) => {
+  //TODO: add imageurls and other fields later
+  if (!card.variants) return [];
+  return card.variants.map((v) => ({
+    variant_id: v.id,
+    card_id: card.id,
+    printing: v.printing,
+    condition: v.condition,
+    market_price: v.price,
+    last_updated: v.lastUpdated,
+  }));
+};
+
+// ------------------------------------------------------------------
+// 4. Core Pipeline Logic
+// ------------------------------------------------------------------
+
+/**
+ * Fetches all cards for a specific set using pagination.
+ * Processes each page (cards + variants) IMMEDIATELY to save memory.
+ */
+async function processCardsForSet(setId) {
+  let offset = 0;
+  const limit = 50;
+  let hasMore = true;
+  let totalCardsProcessed = 0;
+
+  console.log(`\n🃏 Processing Set: ${setId}`);
+
+  while (hasMore) {
+    const response = await justTcg.v1.cards.list({
+      game: "one-piece-card-game",
+      set: setId,
+      limit,
+      offset,
+    });
+
+    if (response.error) {
+      throw new Error(`API Error on set ${setId}: ${response.error}`);
+    }
+
+    const cards = response.data || [];
+    
+    if (cards.length > 0) {
+      // Transform and flatMap variants
+      const dbCards = cards.map(mapCard);
+      const dbVariants = cards.flatMap(mapVariants);
+
+      // Batch Upsert
+      await upsertBatch('cards', dbCards, 'card_id');
+      await upsertBatch('variations', dbVariants, 'variant_id');
+
+      totalCardsProcessed += cards.length;
+      process.stdout.write(`   ↳ Synced ${cards.length} cards & ${dbVariants.length} variants (Offset: ${offset})\r`);
+    }
+
+    if (response.pagination && response.pagination.hasMore) {
+      offset += cards.length;
+      await sleep(300); // Respect Rate Limit
+    } else {
+      hasMore = false;
+    }
+  }
+  console.log(`   ✅ Finished Set: ${setId}. Total: ${totalCardsProcessed} cards.`);
+}
+
+/**
+ * Main Orchestrator
+ */
+async function syncAll() {
+  console.log("🚀 Starting Ingestion Pipeline (JavaScript Edition)...");
+
+  // --- Step 1: Sync Sets ---
+  console.log("📦 Fetching Sets...");
+  let allSets = [];
+  let setOffset = 0;
+  let setsMore = true;
+
+  while(setsMore) {
+    const res = await justTcg.v1.sets.list({ game: "one-piece-card-game", limit: 50, offset: setOffset });
+    if (res.error) throw new Error(`Set Fetch Error: ${res.error}`);
+    
+    allSets.push(...res.data);
+    if(res.pagination && res.pagination.hasMore) {
+      setOffset += res.data.length;
+      await sleep(200);
+    } else {
+      setsMore = false;
+    }
+  }
+
+  console.log(`Found ${allSets.length} sets.`);
+  const dbSets = allSets.map(mapSet);
+  await upsertBatch('card_set', dbSets, 'set_id'); 
+  console.log("✅ Sets synced.");
+
+  // --- Step 2: Stream Cards & Variants per Set ---
+  for (const set of allSets) {
+    try {
+      await processCardsForSet(set.id);
+      await sleep(500); // Breather between sets
+    } catch (err) {
+      console.error(`❌ Failed to process set ${set.id}:`, err.message);
+      // Continue to next set instead of crashing the whole sync
+    }
+  }
+
+  console.log("\n✨ Full Sync Complete!");
+}
+
+// ------------------------------------------------------------------
+// Run
+// ------------------------------------------------------------------
+
+syncAll().catch((e) => {
+  console.error("FATAL ERROR:", e);
+  process.exit(1);
+});
