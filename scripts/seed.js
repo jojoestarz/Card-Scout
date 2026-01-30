@@ -1,183 +1,232 @@
-const { JustTCG } = require('justtcg-js');
-const { createClient } = require('@supabase/supabase-js');
-require('dotenv').config();
-
+import { JustTCG } from "justtcg-js";
+import { createClient } from "@supabase/supabase-js";
+import path from "path";
+import dotenv from "dotenv";
+import { fileURLToPath } from "url"; // Required to recreate __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
+import axios from "axios";
 // ------------------------------------------------------------------
-// 1. Setup & Config
+// Client Setup
 // ------------------------------------------------------------------
+const apiKey = process.env.JUSTTCG_API_KEY || process.env.TCG_API_KEY;
 
-const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || "https://ynhdlnqtzbolovuaxcqx.supabase.co";
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.EXPO_PUBLIC_SUPABASE_KEY;
-const JUSTTCG_API_KEY = process.env.JUSTTCG_API_KEY;
+if (!apiKey)
+  throw new Error(
+    "Missing JUSTTCG_API_KEY or TCG_API_KEY in environment variables",
+  );
 
-if (!SUPABASE_KEY) {
-  console.error("❌ Missing SUPABASE_SERVICE_KEY or EXPO_PUBLIC_SUPABASE_KEY");
-  process.exit(1);
-}
-if (!JUSTTCG_API_KEY) {
-  console.error("❌ Missing JUSTTCG_API_KEY");
-  process.exit(1);
-}
+const client = new JustTCG({ apiKey });
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const justTcg = new JustTCG({ apiKey: JUSTTCG_API_KEY });
+const supabase = createClient(
+  "https://ynhdlnqtzbolovuaxcqx.supabase.co",
+  process.env.SUPABASE_SERVICE_KEY,
+);
 
-// ------------------------------------------------------------------
-// 2. Helpers
-// ------------------------------------------------------------------
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * Generic Upsert Helper
- * Directly sends data to Supabase and handles errors.
- */
-async function upsertBatch(table, rows, conflictKey) {
-  if (!rows || rows.length === 0) return;
-
-  const { error } = await supabase
-    .from(table)
-    .upsert(rows, { onConflict: conflictKey });
-
-  if (error) {
-    console.error(`❌ Error upserting to ${table}:`, error.message);
-    throw error;
-  }
+if (!process.env.SUPABASE_SERVICE_KEY) {
+  console.warn(
+    "⚠️  WARNING: SUPABASE_SERVICE_KEY is missing. Writes may fail due to RLS.",
+  );
 }
 
+  const BUCKET_NAME = 'card-images';
 // ------------------------------------------------------------------
-// 3. Transform Functions
+// Utilities
 // ------------------------------------------------------------------
 
-const mapSet = (set) => ({
-  set_id: set.id,
-  set_name: set.name,
-  release_date: set.releaseDate,
-});
-
-const mapCard = (card) => ({
-  card_id: card.id,
-  name: card.name,
-  set_id: card.set,
-  card_number: card.number,
-  rarity: card.rarity,
-});
-
-const mapVariants = (card) => {
-  //TODO: add imageurls and other fields later
-  if (!card.variants) return [];
-  return card.variants.map((v) => ({
-    variant_id: v.id,
-    card_id: card.id,
-    printing: v.printing,
-    condition: v.condition,
-    market_price: v.price,
-    last_updated: v.lastUpdated,
-  }));
+// Helper to clean integer values (handles "NULL" string from API)
+const cleanInt = (val) => {
+  if (val === "NULL" || val === null || val === undefined || val === "")
+    return null;
+  // If it's already a number, return it
+  if (typeof val === "number") return val;
+  const num = parseInt(val, 10);
+  return isNaN(num) ? null : num;
 };
 
+
+
+//TODO:  Fetch & Upsert Sets:
+async function fetchAndUpsertSets() {
+  const optcgurl = "https://www.optcgapi.com/api/allSets/";
+  try {
+    console.log("Fetching sets from OPTCG API...");
+    const AllSets = await fetch(optcgurl);
+    if (AllSets.ok) {
+      const setsData = await AllSets.json();
+      const dbSets = setsData.map((set) => ({
+        set_id: set.set_id,
+        set_name: set.set_name,
+      }));
+      const { data, error } = await supabase
+        .from("card_set")
+        .upsert(dbSets, { onConflict: "set_id" })
+        .select();
+      if (error) {
+        console.error(
+          "❌ Supabase Upsert Error DETAILS:",
+          JSON.stringify(error, null, 2),
+        );
+      } else {
+        console.log(`✅ Success! Upserted ${data?.length} rows.`);
+      }
+    }
+  } catch (error) {
+    console.error("❌ Error in fetchAndUpsertSets:", error.message);
+  }
+}
+
 // ------------------------------------------------------------------
-// 4. Core Pipeline Logic
+// Image Handling 
 // ------------------------------------------------------------------
+let missedImages = [];
+async function processCardImage(card_id, set_id, source_url) {
+  if (!source_url) {
+    missedImages.push(card_id);
+    return console.warn(`⚠️  No source URL for card ${card_id}`);
+  }
 
-/**
- * Fetches all cards for a specific set using pagination.
- * Processes each page (cards + variants) IMMEDIATELY to save memory.
- */
-async function processCardsForSet(setId) {
-  let offset = 0;
-  const limit = 50;
-  let hasMore = true;
-  let totalCardsProcessed = 0;
+  const fileName = `${card_id}.png`;
+  const filePath = `${set_id}/${fileName}`;
+  
+  try {
+    // Check if it exists in storage already
+    const { data: existingFile } = await supabase.storage
+      .from(BUCKET_NAME)
+      .list(set_id, {
+        search: fileName,
+      });
+    if (existingFile) {
+      // File already exists, skip upload
+      process.stdout.write(`ℹ️  Skipping (exists): ${filePath}\r`);
+      return;
+    }
 
-  console.log(`\n🃏 Processing Set: ${setId}`);
-
-  while (hasMore) {
-    const response = await justTcg.v1.cards.list({
-      game: "one-piece-card-game",
-      set: setId,
-      limit,
-      offset,
+    // 2. Download from OPTCG API source
+    const response = await axios.get(source_url, {
+      responseType: 'arraybuffer'
     });
-
-    if (response.error) {
-      throw new Error(`API Error on set ${setId}: ${response.error}`);
-    }
-
-    const cards = response.data || [];
+    const fileBuffer = Buffer.from(response.data);
+    console.log(`fileBuffer length: ${fileBuffer.length}`);
     
-    if (cards.length > 0) {
-      // Transform and flatMap variants
-      const dbCards = cards.map(mapCard);
-      const dbVariants = cards.flatMap(mapVariants);
 
-      // Batch Upsert
-      await upsertBatch('cards', dbCards, 'card_id');
-      await upsertBatch('variations', dbVariants, 'variant_id');
-
-      totalCardsProcessed += cards.length;
-      process.stdout.write(`   ↳ Synced ${cards.length} cards & ${dbVariants.length} variants (Offset: ${offset})\r`);
+    // 3. Upload to Supabase Storage
+    const { error: uploadError } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(filePath, fileBuffer, {
+        upsert: true,
+      });
+    if (uploadError)
+    {
+      console.error('❌ Upload error:', uploadError);
+      throw uploadError; 
     }
+    else
+    {
+      process.stdout.write(`✅ Uploaded: ${filePath}\r`);
+     }
 
-    if (response.pagination && response.pagination.hasMore) {
-      offset += cards.length;
-      await sleep(300); // Respect Rate Limit
-    } else {
-      hasMore = false;
-    }
+  } catch (error) {
+    console.error(`❌ Failed image for ${card_id}:`, error.message);
   }
-  console.log(`   ✅ Finished Set: ${setId}. Total: ${totalCardsProcessed} cards.`);
 }
 
-/**
- * Main Orchestrator
- */
-async function syncAll() {
-  console.log("🚀 Starting Ingestion Pipeline (JavaScript Edition)...");
 
-  // --- Step 1: Sync Sets ---
-  console.log("📦 Fetching Sets...");
-  let allSets = [];
-  let setOffset = 0;
-  let setsMore = true;
-
-  while(setsMore) {
-    const res = await justTcg.v1.sets.list({ game: "one-piece-card-game", limit: 50, offset: setOffset });
-    if (res.error) throw new Error(`Set Fetch Error: ${res.error}`);
+async function syncImagesToStorage(cards) {
+  console.log(`\n🖼️  Starting Image Sync for ${cards.length} cards...`);
+  
+  const batchSize = 20; // Concurrent uploads
+  try {
+  for (let i = 0; i < cards.length; i += batchSize) {
+    const batch = cards.slice(i, i + batchSize);
     
-    allSets.push(...res.data);
-    if(res.pagination && res.pagination.hasMore) {
-      setOffset += res.data.length;
-      await sleep(200);
-    } else {
-      setsMore = false;
-    }
+    await Promise.all(
+      batch.map(card => processCardImage(
+        card.card_set_id, 
+        card.set_id, 
+        card.card_image
+      ))
+    );
+    const progress = Math.round(((i + batch.length) / cards.length) * 100);
+    process.stdout.write(`   ↳ Image Sync Progress: ${progress}% \r`);
+    
   }
+    console.log(`missedImages: ${missedImages.length}`);
 
-  console.log(`Found ${allSets.length} sets.`);
-  const dbSets = allSets.map(mapSet);
-  await upsertBatch('card_set', dbSets, 'set_id'); 
-  console.log("✅ Sets synced.");
 
-  // --- Step 2: Stream Cards & Variants per Set ---
-  for (const set of allSets) {
-    try {
-      await processCardsForSet(set.id);
-      await sleep(500); // Breather between sets
-    } catch (err) {
-      console.error(`❌ Failed to process set ${set.id}:`, err.message);
-      // Continue to next set instead of crashing the whole sync
-    }
+  } catch (error) {
+    console.error("❌ Error during image sync:", error.message);
   }
-
-  console.log("\n✨ Full Sync Complete!");
+}
+// sets url to supabase storage location
+function getDeterministicPublicUrl(set_id, card_id)
+{ 
+  const { data } = supabase.storage
+    .from(BUCKET_NAME)
+    .getPublicUrl(`${set_id}/${card_id}.png`);
+  return data.publicUrl;
 }
 
-// ------------------------------------------------------------------
-// Run
-// ------------------------------------------------------------------
+//TODO: Fetch & Upsert Cards:
 
-syncAll().catch((e) => {
-  console.error("FATAL ERROR:", e);
-  process.exit(1);
-});
+async function fetchAndUpsertCards() {
+  const optcgurl = "https://www.optcgapi.com/api/allSetCards/";
+  try {
+    console.log("Fetching cards from OPTCG API...");
+    const AllCards = await fetch(optcgurl);
+    if (AllCards.ok) {
+      const cardsData = await AllCards.json();
+
+      // 1. Deduplicate
+      const uniqueCardsMap = new Map();
+      cardsData.forEach((card) => {
+        if (card.card_set_id) {
+          uniqueCardsMap.set(card.card_set_id, card);
+        }
+      });
+      const uniqueCardsData = Array.from(uniqueCardsMap.values());
+      // 2. PREPARATION: Fill the bucket (The separate function)
+      await syncImagesToStorage(uniqueCardsData);
+
+      // 3. Map Data (Now purely mapping, no network calls for images)
+      const dbCards = uniqueCardsData.map((card) => ({
+        card_id: card.card_set_id,
+        name: card.card_name,
+        set_id: card.set_id,
+        rarity: card.rarity,
+        cost: cleanInt(card.card_cost),
+        power: cleanInt(card.card_power),
+        colour: card.card_color,
+        attribute: card.attribute,
+        effect: card.card_text,
+        card_type: card.card_type,
+        sub_type: card.sub_types,
+        life: cleanInt(card.life),
+        counter: cleanInt(card.counter_amount),
+        // We construct the URL deterministically, knowing syncImagesToStorage put it there
+        image_url: getDeterministicPublicUrl(card.set_id, card.card_set_id)
+      }));
+      
+
+      // 4. Upsert in batches (Database logic only)
+      const batchSize = 1000;
+      for (let i = 0; i < dbCards.length; i += batchSize) {
+        const batch = dbCards.slice(i, i + batchSize);
+        console.log(`Upserting DB batch ${Math.floor(i / batchSize) + 1}...`);
+
+        const { error } = await supabase
+          .from("cards")
+          .upsert(batch, { onConflict: "card_id" });
+
+        if (error) {
+          console.error("❌ Batch Upsert Error:", JSON.stringify(error, null, 2));
+        }
+      }
+      console.log("✅ Card sync complete.");
+    }
+  } catch (error) {
+    console.error("❌ Error in fetchAndUpsertCards:", error.message);
+  }
+}
+fetchAndUpsertCards();
