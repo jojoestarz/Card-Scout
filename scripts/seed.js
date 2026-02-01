@@ -178,13 +178,38 @@ async function fetchAndUpsertCards() {
     if (AllCards.ok) {
       const cardsData = await AllCards.json();
 
-      // 1. Deduplicate
-      const uniqueCardsMap = new Map();
-      cardsData.forEach((card) => {
-        if (card.card_set_id) {
-          uniqueCardsMap.set(card.card_set_id, card);
+    // 1. Deduplicate with priority for valid images
+    const uniqueCardsMap = new Map();
+    cardsData.forEach((card) => {
+      const id = card.card_set_id;
+      if (!id) return;
+
+      if (!uniqueCardsMap.has(id)) {
+        // New entry
+        uniqueCardsMap.set(id, card);
+      } else {
+        // Conflict: Decide who wins
+        const existing = uniqueCardsMap.get(id);
+        
+        // Priority 1: Has Image vs No Image
+        const currentHasImage = !!card.card_image;
+        const existingHasImage = !!existing.card_image;
+
+        if (currentHasImage && !existingHasImage) {
+           uniqueCardsMap.set(id, card);
+        } 
+        // Priority 2: If both have images (or both don't), prefer the one WITHOUT "Parallel" or "Reprint" in name
+        // (This helps get the base art for the base ID)
+        else if (currentHasImage === existingHasImage) {
+           const currentIsClean = !card.card_name.includes('Parallel') && !card.card_name.includes('Reprint');
+           const existingIsClean = !existing.card_name.includes('Parallel') && !existing.card_name.includes('Reprint');
+           
+           if (currentIsClean && !existingIsClean) {
+               uniqueCardsMap.set(id, card);
+           }
         }
-      });
+      }
+    });
       const uniqueCardsData = Array.from(uniqueCardsMap.values());
       // 2. PREPARATION: Fill the bucket (The separate function)
       await syncImagesToStorage(uniqueCardsData);
@@ -229,4 +254,24 @@ async function fetchAndUpsertCards() {
     console.error("❌ Error in fetchAndUpsertCards:", error.message);
   }
 }
-fetchAndUpsertCards();
+
+async function main() {
+  const args = process.argv.slice(2);
+  const forceImages = args.includes('--force-images');
+  
+  // Basic Routing
+  // In the future, we can check for --target=market, etc.
+  // Default behavior: Run Base Layer
+  
+  console.log("🚀 Starting Ingestion Pipeline...");
+  console.log("--------------------------------");
+  console.log(`Target: Base Layer (OPTCG)`);
+  console.log(`Force Images: ${forceImages ? 'YES' : 'NO'}`);
+  console.log("--------------------------------");
+
+  await fetchAndUpsertSets();
+  await fetchAndUpsertCards({ forceImages });
+  
+  console.log("\n✨ Pipeline Execution Finished.");
+}
+main();
