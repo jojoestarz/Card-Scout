@@ -2,7 +2,7 @@
   "name": "card-scout",
   "type": "module",
   "version": "1.0.0",
-  "main": "index.ts",
+  "main": "app/index.ts",
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",

@@ -1,8 +1,41 @@
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, Alert } from 'react-native';
+import { StatusBar } from "expo-status-bar";
+import {
+  StyleSheet,
+  Text,
+  View,
+  TextInput,
+  TouchableOpacity,
+  Alert,
+  ScrollView,
+  ActivityIndicator,
+} from "react-native";
+import { useEffect, useState } from "react";
+import { CardComponent } from "../src/components";
+
+import { cardService } from "../src/services/cardService";
+import type { Card } from "../src/types/card";
 
 export default function App() {
-  
+  const [cards, setCards] = useState<Card[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Fetch cards when component mounts
+  useEffect(() => {
+    const fetchCards = async () => {
+      try {
+        const fetchedCards = await cardService.getCards();
+        setCards(fetchedCards);
+      } catch (error) {
+        console.error("Error fetching cards:", error);
+        Alert.alert("Error", "Failed to load cards");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchCards();
+  }, []);
+
   // This function runs when you press the button
   const handleTestPress = () => {
     Alert.alert("It works!", "You are ready to build the Card Finder.");
@@ -13,15 +46,28 @@ export default function App() {
       {/* 1. The Header */}
       <Text style={styles.title}>🏴‍☠️ One Piece Card Finder</Text>
       <Text style={styles.subtitle}>Find your favorite cards easily!</Text>
-      
+
       {/* 2. A Mock Search Bar */}
       <View style={styles.searchBox}>
-        <TextInput 
-          placeholder="Search for cards (e.g., OP05-060)..." 
+        <TextInput
+          placeholder="Search for cards (e.g., OP05-060)..."
           placeholderTextColor="#666"
           style={styles.input}
         />
       </View>
+
+      {/* Grid Layout for Cards */}
+      <ScrollView contentContainerStyle={styles.cardsContainer}>
+        {loading ? (
+          <ActivityIndicator size="large" color="#007AFF" />
+        ) : (
+          <View style={styles.cardGrid}>
+            {cards.map((card) => (
+              <CardComponent key={card.card_id} card={card} />
+            ))}
+          </View>
+        )}
+      </ScrollView>
 
       {/* 3. A Test Button */}
       <TouchableOpacity style={styles.button} onPress={handleTestPress}>
@@ -37,43 +83,54 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
     padding: 20,
   },
   title: {
     fontSize: 24,
-    fontWeight: 'bold',
+    fontWeight: "bold",
     marginBottom: 20,
-    color: '#333',
+    color: "#333",
   },
   subtitle: {
     fontSize: 16,
     marginBottom: 0,
-    color: '#666',
+    color: "#666",
   },
   searchBox: {
-    width: '100%',
-    borderColor: '#ccc',
+    width: "100%",
+    borderColor: "#ccc",
     borderWidth: 1,
     borderRadius: 8,
     padding: 10,
     marginBottom: 20,
-    backgroundColor: '#f9f9f9',
+    backgroundColor: "#f9f9f9",
   },
   input: {
     fontSize: 16,
   },
   button: {
-    backgroundColor: '#007AFF', // Blue color
+    backgroundColor: "#007AFF", // Blue color
     paddingVertical: 12,
     paddingHorizontal: 30,
     borderRadius: 25,
   },
   buttonText: {
-    color: 'white',
+    color: "white",
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: "600",
+  },
+  cardsContainer: {
+    flexGrow: 1,
+    width: "100%",
+    paddingVertical: 10,
+  },
+  cardGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-around",
+    gap: 16,
   },
 });
