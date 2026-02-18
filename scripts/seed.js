@@ -30,7 +30,7 @@ if (!process.env.SUPABASE_SERVICE_KEY) {
   );
 }
 
-  const BUCKET_NAME = 'card-images';
+const BUCKET_NAME = "card-images";
 // ------------------------------------------------------------------
 // Utilities
 // ------------------------------------------------------------------
@@ -44,8 +44,6 @@ const cleanInt = (val) => {
   const num = parseInt(val, 10);
   return isNaN(num) ? null : num;
 };
-
-
 
 //TODO:  Fetch & Upsert Sets:
 async function fetchAndUpsertSets() {
@@ -78,90 +76,162 @@ async function fetchAndUpsertSets() {
 }
 
 // ------------------------------------------------------------------
-// Image Handling 
+// Image Handling
 // ------------------------------------------------------------------
 let missedImages = [];
-async function processCardImage(card_id, set_id, source_url) {
+let uploadFailures = [];
+let uploadSuccesses = new Set();
+
+async function processCardImage(card_id, set_id, source_url, retries = 3) {
   if (!source_url) {
-    missedImages.push(card_id);
-    return console.warn(`⚠️  No source URL for card ${card_id}`);
+    missedImages.push({ card_id, reason: "No source URL" });
+    return { success: false, card_id };
   }
 
   const fileName = `${card_id}.png`;
   const filePath = `${set_id}/${fileName}`;
-  
-  try {
-    // Check if it exists in storage already
-    const { data: existingFile } = await supabase.storage
-      .from(BUCKET_NAME)
-      .list(set_id, {
-        search: fileName,
-      });
-    if (existingFile) {
-      // File already exists, skip upload
-      process.stdout.write(`ℹ️  Skipping (exists): ${filePath}\r`);
-      return;
-    }
 
-    // 2. Download from OPTCG API source
-    const response = await axios.get(source_url, {
-      responseType: 'arraybuffer'
-    });
-    const fileBuffer = Buffer.from(response.data);
-    console.log(`fileBuffer length: ${fileBuffer.length}`);
-    
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      // Check if it exists in storage already - FIXED: check array length
+      const { data: existingFiles, error: listError } = await supabase.storage
+        .from(BUCKET_NAME)
+        .list(set_id, {
+          search: fileName,
+        });
 
-    // 3. Upload to Supabase Storage
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET_NAME)
-      .upload(filePath, fileBuffer, {
-        upsert: true,
+      if (listError) {
+        console.warn(`⚠️  List error for ${filePath}:`, listError.message);
+      }
+
+      // FIXED: Check if array has items, not just if data is truthy
+      if (existingFiles && existingFiles.length > 0) {
+        // Verify the file actually exists by trying to get its public URL
+        const { data: urlData } = supabase.storage
+          .from(BUCKET_NAME)
+          .getPublicUrl(filePath);
+
+        if (urlData?.publicUrl) {
+          uploadSuccesses.add(card_id);
+          process.stdout.write(`ℹ️  Exists: ${filePath}\r`);
+          return { success: true, card_id };
+        }
+      }
+
+      // Download from OPTCG API source with timeout
+      const response = await axios.get(source_url, {
+        responseType: "arraybuffer",
+        timeout: 15000, // 15 second timeout
+        maxContentLength: 5 * 1024 * 1024, // 5MB max
       });
-    if (uploadError)
-    {
-      console.error('❌ Upload error:', uploadError);
-      throw uploadError; 
-    }
-    else
-    {
+
+      const fileBuffer = Buffer.from(response.data);
+
+      if (fileBuffer.length === 0) {
+        throw new Error("Downloaded file is empty");
+      }
+
+      // Upload to Supabase Storage
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from(BUCKET_NAME)
+        .upload(filePath, fileBuffer, {
+          contentType: "image/png",
+          upsert: true,
+        });
+
+      if (uploadError) {
+        throw uploadError;
+      }
+
+      // Verify upload succeeded by checking file exists
+      const { data: verifyFiles } = await supabase.storage
+        .from(BUCKET_NAME)
+        .list(set_id, { search: fileName });
+
+      if (!verifyFiles || verifyFiles.length === 0) {
+        throw new Error(
+          "Upload verification failed - file not found after upload",
+        );
+      }
+
+      uploadSuccesses.add(card_id);
       process.stdout.write(`✅ Uploaded: ${filePath}\r`);
-     }
-
-  } catch (error) {
-    console.error(`❌ Failed image for ${card_id}:`, error.message);
+      return { success: true, card_id };
+    } catch (error) {
+      if (attempt < retries - 1) {
+        // Retry with exponential backoff
+        const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
+        process.stdout.write(
+          `⚠️  Retry ${attempt + 1}/${retries - 1} for ${card_id} in ${delay}ms...\r`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      } else {
+        // Final failure
+        console.error(
+          `\n❌ Failed image for ${card_id} after ${retries} attempts:`,
+          error.message,
+        );
+        uploadFailures.push({
+          card_id,
+          set_id,
+          source_url,
+          error: error.message,
+        });
+        return { success: false, card_id };
+      }
+    }
   }
-}
 
+  return { success: false, card_id };
+}
 
 async function syncImagesToStorage(cards) {
   console.log(`\n🖼️  Starting Image Sync for ${cards.length} cards...`);
-  
+
   const batchSize = 20; // Concurrent uploads
+  const results = [];
   try {
-  for (let i = 0; i < cards.length; i += batchSize) {
-    const batch = cards.slice(i, i + batchSize);
-    
-    await Promise.all(
-      batch.map(card => processCardImage(
-        card.card_set_id, 
-        card.set_id, 
-        card.card_image
-      ))
-    );
-    const progress = Math.round(((i + batch.length) / cards.length) * 100);
-    process.stdout.write(`   ↳ Image Sync Progress: ${progress}% \r`);
-    
-  }
-    console.log(`missedImages: ${missedImages.length}`);
+    for (let i = 0; i < cards.length; i += batchSize) {
+      const batch = cards.slice(i, i + batchSize);
 
+      // Process batch with proper error handling
+      const batchResults = await Promise.allSettled(
+        batch.map((card) =>
+          processCardImage(card.card_set_id, card.set_id, card.card_image),
+        ),
+      );
 
+      results.push(...batchResults);
+
+      const progress = Math.round(((i + batch.length) / cards.length) * 100);
+      process.stdout.write(`   ↳ Image Sync Progress: ${progress}% \r`);
+
+      // Small delay between batches to avoid rate limiting
+      if (i + batchSize < cards.length) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+
+    console.log(`\n\n📊 Image Sync Summary:`);
+    console.log(`   ✅ Successful uploads: ${uploadSuccesses.size}`);
+    console.log(`   ⚠️  Missing source URLs: ${missedImages.length}`);
+    console.log(`   ❌ Upload failures: ${uploadFailures.length}`);
+
+    if (uploadFailures.length > 0) {
+      console.log(`\n⚠️  Failed uploads details:`);
+      uploadFailures.slice(0, 10).forEach((fail) => {
+        console.log(`   - ${fail.card_id}: ${fail.error}`);
+      });
+      if (uploadFailures.length > 10) {
+        console.log(`   ... and ${uploadFailures.length - 10} more`);
+      }
+    }
   } catch (error) {
     console.error("❌ Error during image sync:", error.message);
   }
 }
 // sets url to supabase storage location
-function getDeterministicPublicUrl(set_id, card_id)
-{ 
+function getDeterministicPublicUrl(set_id, card_id) {
   const { data } = supabase.storage
     .from(BUCKET_NAME)
     .getPublicUrl(`${set_id}/${card_id}.png`);
@@ -178,43 +248,47 @@ async function fetchAndUpsertCards() {
     if (AllCards.ok) {
       const cardsData = await AllCards.json();
 
-    // 1. Deduplicate with priority for valid images
-    const uniqueCardsMap = new Map();
-    cardsData.forEach((card) => {
-      const id = card.card_set_id;
-      if (!id) return;
+      // 1. Deduplicate with priority for valid images
+      const uniqueCardsMap = new Map();
+      cardsData.forEach((card) => {
+        const id = card.card_set_id;
+        if (!id) return;
 
-      if (!uniqueCardsMap.has(id)) {
-        // New entry
-        uniqueCardsMap.set(id, card);
-      } else {
-        // Conflict: Decide who wins
-        const existing = uniqueCardsMap.get(id);
-        
-        // Priority 1: Has Image vs No Image
-        const currentHasImage = !!card.card_image;
-        const existingHasImage = !!existing.card_image;
+        if (!uniqueCardsMap.has(id)) {
+          // New entry
+          uniqueCardsMap.set(id, card);
+        } else {
+          // Conflict: Decide who wins
+          const existing = uniqueCardsMap.get(id);
 
-        if (currentHasImage && !existingHasImage) {
-           uniqueCardsMap.set(id, card);
-        } 
-        // Priority 2: If both have images (or both don't), prefer the one WITHOUT "Parallel" or "Reprint" in name
-        // (This helps get the base art for the base ID)
-        else if (currentHasImage === existingHasImage) {
-           const currentIsClean = !card.card_name.includes('Parallel') && !card.card_name.includes('Reprint');
-           const existingIsClean = !existing.card_name.includes('Parallel') && !existing.card_name.includes('Reprint');
-           
-           if (currentIsClean && !existingIsClean) {
-               uniqueCardsMap.set(id, card);
-           }
+          // Priority 1: Has Image vs No Image
+          const currentHasImage = !!card.card_image;
+          const existingHasImage = !!existing.card_image;
+
+          if (currentHasImage && !existingHasImage) {
+            uniqueCardsMap.set(id, card);
+          }
+          // Priority 2: If both have images (or both don't), prefer the one WITHOUT "Parallel" or "Reprint" in name
+          // (This helps get the base art for the base ID)
+          else if (currentHasImage === existingHasImage) {
+            const currentIsClean =
+              !card.card_name.includes("Parallel") &&
+              !card.card_name.includes("Reprint");
+            const existingIsClean =
+              !existing.card_name.includes("Parallel") &&
+              !existing.card_name.includes("Reprint");
+
+            if (currentIsClean && !existingIsClean) {
+              uniqueCardsMap.set(id, card);
+            }
+          }
         }
-      }
-    });
+      });
       const uniqueCardsData = Array.from(uniqueCardsMap.values());
       // 2. PREPARATION: Fill the bucket (The separate function)
       await syncImagesToStorage(uniqueCardsData);
 
-      // 3. Map Data (Now purely mapping, no network calls for images)
+      // 3. Map Data - Only set image_url if upload was successful
       const dbCards = uniqueCardsData.map((card) => ({
         card_id: card.card_set_id,
         name: card.card_name,
@@ -229,10 +303,11 @@ async function fetchAndUpsertCards() {
         sub_type: card.sub_types,
         life: cleanInt(card.life),
         counter: cleanInt(card.counter_amount),
-        // We construct the URL deterministically, knowing syncImagesToStorage put it there
-        image_url: getDeterministicPublicUrl(card.set_id, card.card_set_id)
+        // Only set image_url if the upload was successful
+        image_url: uploadSuccesses.has(card.card_set_id)
+          ? getDeterministicPublicUrl(card.set_id, card.card_set_id)
+          : null,
       }));
-      
 
       // 4. Upsert in batches (Database logic only)
       const batchSize = 1000;
@@ -245,7 +320,10 @@ async function fetchAndUpsertCards() {
           .upsert(batch, { onConflict: "card_id" });
 
         if (error) {
-          console.error("❌ Batch Upsert Error:", JSON.stringify(error, null, 2));
+          console.error(
+            "❌ Batch Upsert Error:",
+            JSON.stringify(error, null, 2),
+          );
         }
       }
       console.log("✅ Card sync complete.");
@@ -257,21 +335,21 @@ async function fetchAndUpsertCards() {
 
 async function main() {
   const args = process.argv.slice(2);
-  const forceImages = args.includes('--force-images');
-  
+  const forceImages = args.includes("--force-images");
+
   // Basic Routing
   // In the future, we can check for --target=market, etc.
   // Default behavior: Run Base Layer
-  
+
   console.log("🚀 Starting Ingestion Pipeline...");
   console.log("--------------------------------");
   console.log(`Target: Base Layer (OPTCG)`);
-  console.log(`Force Images: ${forceImages ? 'YES' : 'NO'}`);
+  console.log(`Force Images: ${forceImages ? "YES" : "NO"}`);
   console.log("--------------------------------");
 
   await fetchAndUpsertSets();
   await fetchAndUpsertCards({ forceImages });
-  
+
   console.log("\n✨ Pipeline Execution Finished.");
 }
 main();
