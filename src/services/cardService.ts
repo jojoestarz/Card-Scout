@@ -73,13 +73,15 @@ export const cardService = {
   },
 };
 
-// Test the service
-(async () => {
-  try {
-    const cards = await cardService.getCards();
-    console.log("✅ Fetched cards:", cards.length);
-    console.log("First card:", cards[0]);
-  } catch (err) {
-    console.error("❌ Failed to fetch cards:", err);
-  }
-})();
+// Test the service - only run when this file is executed directly
+if (typeof require !== "undefined" && require.main === module) {
+  (async () => {
+    try {
+      const cards = await cardService.getCards();
+      console.log("✅ Fetched cards:", cards.length);
+      console.log("First card:", cards[0]);
+    } catch (err) {
+      console.error("❌ Failed to fetch cards:", err);
+    }
+  })();
+}

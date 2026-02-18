@@ -1,4 +1,5 @@
 import { StatusBar } from "expo-status-bar";
+import DotBackground from "../src/components/dottedBackground";
 import {
   StyleSheet,
   Text,
@@ -14,11 +15,12 @@ import { CardComponent } from "../src/components";
 
 import { cardService } from "../src/services/cardService";
 import type { Card } from "../src/types/card";
+import { useThemeColors } from "../src/hooks/theme";
 
 export default function App() {
+  const theme = useThemeColors();
   const [cards, setCards] = useState<Card[]>([]);
   const [loading, setLoading] = useState(true);
-
   // Fetch cards when component mounts
   useEffect(() => {
     const fetchCards = async () => {
@@ -42,10 +44,15 @@ export default function App() {
   };
 
   return (
+    <View style={styles.root}>
+      <DotBackground />
     <View style={styles.container}>
       {/* 1. The Header */}
-      <Text style={styles.title}>🏴‍☠️ One Piece Card Finder</Text>
-      <Text style={styles.subtitle}>Find your favorite cards easily!</Text>
+        <View style={styles.header}>
+        
+        <Text style={[styles.title, { color: theme.text }]}>🏴‍☠️ One Piece Card Finder</Text>
+        <Text style={[styles.subtitle, { color: theme.textSecondary }]}>Find your favorite cards easily!</Text>
+      </View>
 
       {/* 2. A Mock Search Bar */}
       <View style={styles.searchBox}>
@@ -72,32 +79,38 @@ export default function App() {
       {/* 3. A Test Button */}
       <TouchableOpacity style={styles.button} onPress={handleTestPress}>
         <Text style={styles.buttonText}>Test Connection</Text>
-      </TouchableOpacity>
+        </TouchableOpacity>
 
       <StatusBar style="auto" />
+      </View>
     </View>
   );
 }
 
 // 4. The Styles (CSS-in-JS)
 const styles = StyleSheet.create({
+  root:{
+    flex: 1,
+  },
   container: {
     flex: 1,
-    backgroundColor: "#fff",
     alignItems: "center",
     justifyContent: "center",
     padding: 20,
   },
+  header: {
+    marginTop: 50,
+    marginBottom: 20,
+    alignItems: "center",
+    gap: 4,
+  },
   title: {
     fontSize: 24,
     fontWeight: "bold",
-    marginBottom: 20,
-    color: "#333",
   },
   subtitle: {
     fontSize: 16,
     marginBottom: 0,
-    color: "#666",
   },
   searchBox: {
     width: "100%",
