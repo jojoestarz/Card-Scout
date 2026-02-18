@@ -9,6 +9,7 @@ import {
   Alert,
   ScrollView,
   ActivityIndicator,
+  FlatList,
 } from "react-native";
 import { useEffect, useState } from "react";
 import { CardComponent } from "../src/components";
@@ -16,27 +17,149 @@ import { CardComponent } from "../src/components";
 import { cardService } from "../src/services/cardService";
 import type { Card } from "../src/types/card";
 import { useThemeColors } from "../src/hooks/theme";
-
+import { useDebounce } from "../src/hooks/debounce";
 export default function App() {
   const theme = useThemeColors();
   const [cards, setCards] = useState<Card[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+
+  const [searchTerm, setSearchTerm] = useState("");
+  const [initialLoad, setInitialLoad] = useState(true);
   // Fetch cards when component mounts
+  const debouncedSearchTerm = useDebounce(searchTerm, 500);
+
+  const PAGE_SIZE = 30;
+
+  console.log("[App] debouncedSearchTerm:", debouncedSearchTerm);
+
+  const HandleSearch = async (
+    query: string,
+    pageNum: number = 0,
+    append: boolean = false,
+  ) => {
+    console.log(
+      "[HandleSearch] Query:",
+      query,
+      "Page:",
+      pageNum,
+      "Append:",
+      append,
+    );
+
+    const offset = pageNum * PAGE_SIZE;
+    let fetchedCards: Card[] = [];
+
+    if (query.trim() === "") {
+      console.log("[HandleSearch] Fetching all cards with pagination");
+      const result = await cardService.SearchCards({
+        limit: PAGE_SIZE,
+        offset,
+      });
+      fetchedCards = result.data;
+    } else {
+      console.log("[HandleSearch] Searching for:", query);
+      const result = await cardService.SearchCards({
+        searchTerm: query,
+        limit: PAGE_SIZE,
+        offset,
+      });
+      fetchedCards = result.data;
+    }
+
+    const filteredResults = fetchedCards.filter((card) => card != null);
+
+    // Check if we have more data to load
+    setHasMore(filteredResults.length === PAGE_SIZE);
+
+    console.log(
+      "[HandleSearch] Got",
+      filteredResults.length,
+      "results, hasMore:",
+      filteredResults.length === PAGE_SIZE,
+    );
+
+    if (!append && filteredResults.length === 0 && pageNum === 0) {
+      Alert.alert("No Results", "No cards found matching your search.");
+    }
+
+    return filteredResults;
+  };
+
   useEffect(() => {
-    const fetchCards = async () => {
+    const initialLoadCards = async () => {
       try {
-        const fetchedCards = await cardService.getCards();
+        const fetchedCards = await HandleSearch("", 0, false);
         setCards(fetchedCards);
+        setPage(0);
       } catch (error) {
-        console.error("Error fetching cards:", error);
-        Alert.alert("Error", "Failed to load cards");
+        Alert.alert("Error", "Failed to fetch cards. Please try again.");
+      } finally {
+        setInitializing(false);
+        setInitialLoad(false);
+      }
+    };
+    initialLoadCards();
+  }, []);
+
+  useEffect(() => {
+    if (initialLoad) {
+      return; // Skip debounce on initial load
+    }
+
+    const Searchhandler = async () => {
+      console.log("[Searchhandler] Starting search for:", debouncedSearchTerm);
+      setLoading(true);
+      setPage(0); // Reset to first page on new search
+      try {
+        const results = await HandleSearch(debouncedSearchTerm, 0, false);
+        setCards(results);
       } finally {
         setLoading(false);
       }
     };
+    Searchhandler();
+  }, [debouncedSearchTerm, initialLoad]);
 
-    fetchCards();
-  }, []);
+  const loadMoreCards = async () => {
+    if (loadingMore || !hasMore) {
+      console.log(
+        "[loadMoreCards] Skipping - loadingMore:",
+        loadingMore,
+        "hasMore:",
+        hasMore,
+      );
+      return;
+    }
+
+    console.log("[loadMoreCards] Loading page:", page + 1);
+    setLoadingMore(true);
+    try {
+      const nextPage = page + 1;
+      const moreCards = await HandleSearch(debouncedSearchTerm, nextPage, true);
+      setCards((prevCards) => [...prevCards, ...moreCards]);
+      setPage(nextPage);
+    } catch (error) {
+      console.error("[loadMoreCards] Error:", error);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const renderFooter = () => {
+    if (!loadingMore) return null;
+    return (
+      <View style={styles.footerLoader}>
+        <ActivityIndicator size="small" color="#007AFF" />
+        <Text style={{ color: theme.textSecondary, marginLeft: 10 }}>
+          Loading more...
+        </Text>
+      </View>
+    );
+  };
 
   // This function runs when you press the button
   const handleTestPress = () => {
@@ -46,42 +169,90 @@ export default function App() {
   return (
     <View style={styles.root}>
       <DotBackground />
-    <View style={styles.container}>
-      {/* 1. The Header */}
+      <View style={styles.container}>
+        {/* 1. The Header */}
         <View style={styles.header}>
-        
-        <Text style={[styles.title, { color: theme.text }]}>🏴‍☠️ One Piece Card Finder</Text>
-        <Text style={[styles.subtitle, { color: theme.textSecondary }]}>Find your favorite cards easily!</Text>
-      </View>
+          <Text style={[styles.title, { color: theme.text }]}>
+            🏴‍☠️ One Piece Card Finder
+          </Text>
+          <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
+            Find your favorite cards easily!
+          </Text>
+        </View>
 
-      {/* 2. A Mock Search Bar */}
-      <View style={styles.searchBox}>
-        <TextInput
-          placeholder="Search for cards (e.g., OP05-060)..."
-          placeholderTextColor="#666"
-          style={styles.input}
-        />
-      </View>
+        {/* 2. A Mock Search Bar */}
+        <View style={styles.searchBox}>
+          <TextInput
+            placeholder="Search for cards (e.g., OP05-060)..."
+            placeholderTextColor="#666"
+            value={searchTerm}
+            onChangeText={(text) => {
+              console.log("[TextInput] User typed:", text);
+              setSearchTerm(text);
+            }}
+            style={styles.input}
+          />
+          {searchTerm.length > 0 && (
+            <TouchableOpacity
+              onPress={() => setSearchTerm("")}
+              style={{ position: "absolute", right: 10, top: 10 }}
+            >
+              <Text style={{ color: "#666", fontSize: 16 }}>X</Text>
+            </TouchableOpacity>
+          )}
+        </View>
 
-      {/* Grid Layout for Cards */}
-      <ScrollView contentContainerStyle={styles.cardsContainer}>
+        {/* Grid Layout for Cards */}
+        {initializing ? (
+          <View
+            style={{ flex: 1, justifyContent: "center", alignItems: "center" }}
+          >
+            <ActivityIndicator size="large" color="#007AFF" />
+            <Text style={{ color: theme.text, marginTop: 10 }}>
+              Loading cards...
+            </Text>
+          </View>
+        ) : (
+          <View style={{ flex: 1, position: "relative" }}>
+            {loading && (
+              <View style={styles.loadingOverlay}>
+                <ActivityIndicator size="small" color="#007AFF" />
+              </View>
+            )}
+            <FlatList
+              data={cards}
+              keyExtractor={(card: Card) => card.card_id}
+              renderItem={({ item }: { item: Card }) => (
+                <CardComponent card={item} />
+              )}
+              numColumns={2}
+              contentContainerStyle={styles.cardsContainer}
+              columnWrapperStyle={styles.cardGrid}
+              showsVerticalScrollIndicator={false}
+              onEndReached={loadMoreCards}
+              onEndReachedThreshold={0.5}
+              ListFooterComponent={renderFooter}
+            />
+          </View>
+        )}
+        {/* <ScrollView contentContainerStyle={styles.cardsContainer}>
         {loading ? (
           <ActivityIndicator size="large" color="#007AFF" />
         ) : (
           <View style={styles.cardGrid}>
             {cards.map((card) => (
-              <CardComponent key={card.card_id} card={card} />
+              <CardComponent  card={card} />
             ))}
           </View>
         )}
-      </ScrollView>
+      </ScrollView> */}
 
-      {/* 3. A Test Button */}
-      <TouchableOpacity style={styles.button} onPress={handleTestPress}>
-        <Text style={styles.buttonText}>Test Connection</Text>
+        {/* 3. A Test Button */}
+        <TouchableOpacity style={styles.button} onPress={handleTestPress}>
+          <Text style={styles.buttonText}>Test Connection</Text>
         </TouchableOpacity>
 
-      <StatusBar style="auto" />
+        <StatusBar style="auto" />
       </View>
     </View>
   );
@@ -89,7 +260,7 @@ export default function App() {
 
 // 4. The Styles (CSS-in-JS)
 const styles = StyleSheet.create({
-  root:{
+  root: {
     flex: 1,
   },
   container: {
@@ -139,11 +310,32 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     width: "100%",
     paddingVertical: 10,
+    gap: 16,
   },
   cardGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
     justifyContent: "space-around",
     gap: 16,
+  },
+  loadingOverlay: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    zIndex: 1000,
+    backgroundColor: "rgba(255, 255, 255, 0.9)",
+    padding: 8,
+    borderRadius: 20,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  footerLoader: {
+    paddingVertical: 20,
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
   },
 });

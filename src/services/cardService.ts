@@ -69,7 +69,7 @@ export const cardService = {
       console.error("Error fetching cards:", error.message);
       throw error;
     }
-    return { data: data as Card[], count };
+    return { data: data as Card[] };
   },
 };
 
