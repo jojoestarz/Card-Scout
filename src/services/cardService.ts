@@ -1,87 +1,119 @@
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import type { Card } from "../types/card";
-import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL =
-  process.env.EXPO_PUBLIC_SUPABASE_URL ||
-  "https://ynhdlnqtzbolovuaxcqx.supabase.co";
-const SUPABASE_KEY = process.env.EXPO_PUBLIC_SUPABASE_KEY;
+const SUPABASE_URL = "https://ynhdlnqtzbolovuaxcqx.supabase.co";
+const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || SUPABASE_URL;
 
-if (!SUPABASE_KEY) {
-  console.warn("⚠️  Missing EXPO_PUBLIC_SUPABASE_KEY");
+// Lazy initialization - only create client when first accessed
+let _supabase: SupabaseClient | null = null;
+
+function getSupabaseClient(): SupabaseClient {
+  if (!_supabase) {
+    // Try service key first (bypasses RLS), fall back to public key
+    const supabaseKey =
+      process.env.SUPABASE_SERVICE_KEY ||
+      process.env.EXPO_PUBLIC_SUPABASE_KEY ||
+      "";
+
+    if (!supabaseKey) {
+      console.warn(
+        "⚠️  Missing SUPABASE_SERVICE_KEY or EXPO_PUBLIC_SUPABASE_KEY",
+      );
+      throw new Error("supabaseKey is required.");
+    }
+
+    console.log(
+      "[getSupabaseClient] Using key type:",
+      process.env.SUPABASE_SERVICE_KEY ? "SERVICE" : "PUBLIC",
+    );
+    _supabase = createClient(supabaseUrl, supabaseKey);
+  }
+
+  return _supabase;
 }
 
-export const supabaseNode = createClient(SUPABASE_URL, SUPABASE_KEY as string, {
-  auth: {
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: false,
-  },
-});
+interface SearchCardsParams {
+  searchTerm?: string;
+  colour?: string;
+  card_id?: string;
+  limit?: number;
+  offset?: number;
+}
 
 export const cardService = {
-  /**
-   * Fetch a single card by its ID (e.g., "OP01-001")
-   */
-  async getCards(): Promise<Card[]> {
-    const { data, error } = await supabaseNode
+  async SearchCards({
+    searchTerm = "",
+    colour,
+    card_id,
+    limit = 20,
+    offset = 0,
+  }: SearchCardsParams = {}) {
+    try {
+      console.log("[cardService.SearchCards] Query:", {
+        searchTerm,
+        colour,
+        card_id,
+        limit,
+        offset,
+      });
+
+      const supabase = getSupabaseClient(); // Get client lazily
+      let query = supabase.from("cards").select("*");
+
+      // Apply filters
+      if (searchTerm) {
+        console.log("[SearchCards] Applying searchTerm filter:", searchTerm);
+        query = query.ilike("name", `%${searchTerm}%`);
+      }
+
+      if (colour) {
+        console.log("[SearchCards] Applying colour filter:", colour);
+        query = query.eq("colour", colour);
+      }
+
+      if (card_id) {
+        console.log("[SearchCards] Applying card_id filter:", card_id);
+        query = query.eq("card_id", card_id);
+      }
+
+      // Apply pagination
+      console.log(
+        "[SearchCards] Applying pagination - offset:",
+        offset,
+        "limit:",
+        limit,
+      );
+      query = query.range(offset, offset + limit - 1);
+
+      const { data, error } = await query;
+
+      if (error) {
+        console.error("[cardService.SearchCards] Database error:", error);
+        throw error;
+      }
+
+      console.log(`[cardService.SearchCards] Found ${data?.length || 0} cards`);
+      return { data: data as Card[], error: null };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error("[cardService.SearchCards] Exception:", errorMsg, error);
+      return { data: [], error };
+    }
+  },
+
+  async getCardById(cardId: string) {
+    const supabase = getSupabaseClient(); // Get client lazily
+    const { data, error } = await supabase
       .from("cards")
       .select("*")
-      .limit(10);
+      .eq("card_id", cardId)
+      .single();
 
     if (error) {
-      console.error("Error fetching cards:", error.message);
-      throw error;
+      console.error("Error fetching card:", error);
+      return null;
     }
 
-    return (data ?? []) as Card[];
-  },
-  /**
-   * Search cards with pagination and filters
-   */
-  async SearchCards(filters: {
-    searchTerm?: string;
-    colour?: string;
-    set_id?: string;
-    limit?: number;
-    offset?: number;
-  }) {
-    let query = supabaseNode.from("cards").select("*", { count: "exact" });
-
-    if (filters.searchTerm) {
-      // ILIKE is case-insensitive search
-      query = query.ilike("name", `%${filters.searchTerm}%`);
-    }
-    if (filters.colour) {
-      query = query.eq("colour", filters.colour);
-    }
-    if (filters.set_id) {
-      query = query.eq("set_id", filters.set_id);
-    }
-
-    // Pagination
-    const limit = filters.limit || 20;
-    const offset = filters.offset || 0;
-    query = query.range(offset, offset + limit - 1);
-
-    const { data, error, count } = await query;
-
-    if (error) {
-      console.error("Error fetching cards:", error.message);
-      throw error;
-    }
-    return { data: data as Card[] };
+    return data as Card;
   },
 };
-
-// Test the service - only run when this file is executed directly
-if (typeof require !== "undefined" && require.main === module) {
-  (async () => {
-    try {
-      const cards = await cardService.getCards();
-      console.log("✅ Fetched cards:", cards.length);
-      console.log("First card:", cards[0]);
-    } catch (err) {
-      console.error("❌ Failed to fetch cards:", err);
-    }
-  })();
-}

@@ -34,8 +34,6 @@ export default function App() {
 
   const PAGE_SIZE = 30;
 
-  console.log("[App] debouncedSearchTerm:", debouncedSearchTerm);
-
   const HandleSearch = async (
     query: string,
     pageNum: number = 0,
