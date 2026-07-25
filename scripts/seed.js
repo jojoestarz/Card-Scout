@@ -1,4 +1,3 @@
-import { JustTCG } from "justtcg-js";
 import { createClient } from "@supabase/supabase-js";
 import path from "path";
 import dotenv from "dotenv";
@@ -21,21 +20,6 @@ if (!process.env.SUPABASE_SERVICE_KEY) {
   console.warn(
     "⚠️  WARNING: SUPABASE_SERVICE_KEY is missing. Writes may fail due to RLS.",
   );
-}
-
-let justTcgClient = null;
-
-function getJustTCGClient() {
-  const apiKey = process.env.JUSTTCG_API_KEY || process.env.TCG_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "Missing JUSTTCG_API_KEY or TCG_API_KEY (required for --sync-prices)",
-    );
-  }
-  if (!justTcgClient) {
-    justTcgClient = new JustTCG({ apiKey });
-  }
-  return justTcgClient;
 }
 
 const BUCKET_NAME = "card-images";
@@ -460,12 +444,11 @@ async function fetchAndUpsertCards({ forceImages = false, skipImages = false } =
 }
 
 // ------------------------------------------------------------------
-// JustTCG pricing (Phase 2 stub — only with --sync-prices)
+// JustTCG pricing (Phase 2 — not implemented yet)
 // ------------------------------------------------------------------
 async function syncPricesFromJustTCG() {
-  getJustTCGClient();
   console.log(
-    "ℹ️  JustTCG price sync is deferred to Phase 2. Client initialized; no pricing writes yet.",
+    "ℹ️  JustTCG price sync is deferred to Phase 2. Skipping; no pricing writes.",
   );
 }
 
