@@ -1,15 +1,17 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import type { Card } from "../types/card";
+import type { Variation } from "../types/variation";
 
 const SUPABASE_URL = "https://ynhdlnqtzbolovuaxcqx.supabase.co";
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || SUPABASE_URL;
+
+const CARD_ID_PATTERN = /^OP\d{2}-\d{3}$/i;
 
 // Lazy initialization - only create client when first accessed
 let _supabase: SupabaseClient | null = null;
 
 function getSupabaseClient(): SupabaseClient {
   if (!_supabase) {
-    // Try service key first (bypasses RLS), fall back to public key
     const supabaseKey =
       process.env.SUPABASE_SERVICE_KEY ||
       process.env.EXPO_PUBLIC_SUPABASE_KEY ||
@@ -32,10 +34,27 @@ function getSupabaseClient(): SupabaseClient {
   return _supabase;
 }
 
-interface SearchCardsParams {
+function sortVariations(variations: Variation[]): Variation[] {
+  const order = ["normal", "parallel", "reprint", "manga"];
+  return [...variations].sort((a, b) => {
+    const aIdx = order.indexOf(a.printing);
+    const bIdx = order.indexOf(b.printing);
+    const aOrder = aIdx === -1 ? order.length : aIdx;
+    const bOrder = bIdx === -1 ? order.length : bIdx;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return a.printing.localeCompare(b.printing);
+  });
+}
+
+export interface SearchCardsParams {
   searchTerm?: string;
   colour?: string;
   card_id?: string;
+  card_type?: string;
+  attribute?: string;
+  rarity?: string;
+  set_id?: string;
+  leadersOnly?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -45,6 +64,11 @@ export const cardService = {
     searchTerm = "",
     colour,
     card_id,
+    card_type,
+    attribute,
+    rarity,
+    set_id,
+    leadersOnly,
     limit = 20,
     offset = 0,
   }: SearchCardsParams = {}) {
@@ -53,17 +77,26 @@ export const cardService = {
         searchTerm,
         colour,
         card_id,
+        card_type,
+        attribute,
+        rarity,
+        set_id,
+        leadersOnly,
         limit,
         offset,
       });
 
-      const supabase = getSupabaseClient(); // Get client lazily
+      const supabase = getSupabaseClient();
       let query = supabase.from("cards").select("*");
 
-      // Apply filters
       if (searchTerm) {
         console.log("[SearchCards] Applying searchTerm filter:", searchTerm);
-        query = query.ilike("name", `%${searchTerm}%`);
+        const term = searchTerm.trim();
+        if (CARD_ID_PATTERN.test(term)) {
+          query = query.eq("card_id", term.toUpperCase());
+        } else {
+          query = query.ilike("name", `%${term}%`);
+        }
       }
 
       if (colour) {
@@ -76,7 +109,29 @@ export const cardService = {
         query = query.eq("card_id", card_id);
       }
 
-      // Apply pagination
+      if (leadersOnly) {
+        console.log("[SearchCards] Applying leadersOnly filter");
+        query = query.eq("card_type", "Leader");
+      } else if (card_type) {
+        console.log("[SearchCards] Applying card_type filter:", card_type);
+        query = query.eq("card_type", card_type);
+      }
+
+      if (attribute) {
+        console.log("[SearchCards] Applying attribute filter:", attribute);
+        query = query.eq("attribute", attribute);
+      }
+
+      if (rarity) {
+        console.log("[SearchCards] Applying rarity filter:", rarity);
+        query = query.eq("rarity", rarity);
+      }
+
+      if (set_id) {
+        console.log("[SearchCards] Applying set_id filter:", set_id);
+        query = query.eq("set_id", set_id);
+      }
+
       console.log(
         "[SearchCards] Applying pagination - offset:",
         offset,
@@ -102,18 +157,43 @@ export const cardService = {
   },
 
   async getCardById(cardId: string) {
-    const supabase = getSupabaseClient(); // Get client lazily
+    return this.getCardWithVariations(cardId);
+  },
+
+  async getCardWithVariations(cardId: string): Promise<Card | null> {
+    const supabase = getSupabaseClient();
     const { data, error } = await supabase
       .from("cards")
-      .select("*")
+      .select("*, variations(*)")
       .eq("card_id", cardId)
       .single();
 
     if (error) {
-      console.error("Error fetching card:", error);
+      console.error("Error fetching card with variations:", error);
       return null;
     }
 
-    return data as Card;
+    const card = data as Card;
+    if (card.variations) {
+      card.variations = sortVariations(card.variations);
+    }
+
+    return card;
+  },
+
+  async getVariationById(variationsId: string): Promise<Variation | null> {
+    const supabase = getSupabaseClient();
+    const { data, error } = await supabase
+      .from("variations")
+      .select("*")
+      .eq("variations_id", variationsId)
+      .single();
+
+    if (error) {
+      console.error("Error fetching variation:", error);
+      return null;
+    }
+
+    return data as Variation;
   },
 };

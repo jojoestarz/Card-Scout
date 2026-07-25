@@ -2,23 +2,16 @@ import { JustTCG } from "justtcg-js";
 import { createClient } from "@supabase/supabase-js";
 import path from "path";
 import dotenv from "dotenv";
-import { fileURLToPath } from "url"; // Required to recreate __dirname
+import { fileURLToPath } from "url";
+import axios from "axios";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
-import axios from "axios";
+
 // ------------------------------------------------------------------
 // Client Setup
 // ------------------------------------------------------------------
-const apiKey = process.env.JUSTTCG_API_KEY || process.env.TCG_API_KEY;
-
-if (!apiKey)
-  throw new Error(
-    "Missing JUSTTCG_API_KEY or TCG_API_KEY in environment variables",
-  );
-
-const client = new JustTCG({ apiKey });
-
 const supabase = createClient(
   "https://ynhdlnqtzbolovuaxcqx.supabase.co",
   process.env.SUPABASE_SERVICE_KEY,
@@ -30,22 +23,99 @@ if (!process.env.SUPABASE_SERVICE_KEY) {
   );
 }
 
+let justTcgClient = null;
+
+function getJustTCGClient() {
+  const apiKey = process.env.JUSTTCG_API_KEY || process.env.TCG_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "Missing JUSTTCG_API_KEY or TCG_API_KEY (required for --sync-prices)",
+    );
+  }
+  if (!justTcgClient) {
+    justTcgClient = new JustTCG({ apiKey });
+  }
+  return justTcgClient;
+}
+
 const BUCKET_NAME = "card-images";
+
 // ------------------------------------------------------------------
 // Utilities
 // ------------------------------------------------------------------
-
-// Helper to clean integer values (handles "NULL" string from API)
 const cleanInt = (val) => {
   if (val === "NULL" || val === null || val === undefined || val === "")
     return null;
-  // If it's already a number, return it
   if (typeof val === "number") return val;
   const num = parseInt(val, 10);
   return isNaN(num) ? null : num;
 };
 
-//TODO:  Fetch & Upsert Sets:
+function derivePrinting(cardName) {
+  if (cardName.includes("Parallel")) return "parallel";
+  if (cardName.includes("Reprint")) return "reprint";
+  if (cardName.includes("Manga")) return "manga";
+  return "normal";
+}
+
+function buildVariationsId(cardId, printing) {
+  return `${cardId}:${printing}`;
+}
+
+function toStorageFileName(variationsId) {
+  return `${variationsId.replace(/:/g, "_")}.png`;
+}
+
+function pickCanonicalRow(rows) {
+  const sorted = [...rows].sort((a, b) => {
+    const aClean =
+      !a.card_name.includes("Parallel") && !a.card_name.includes("Reprint");
+    const bClean =
+      !b.card_name.includes("Parallel") && !b.card_name.includes("Reprint");
+    if (aClean !== bClean) return aClean ? -1 : 1;
+
+    const aHasImage = !!a.card_image;
+    const bHasImage = !!b.card_image;
+    if (aHasImage !== bHasImage) return aHasImage ? -1 : 1;
+
+    return a.card_name.localeCompare(b.card_name);
+  });
+  return sorted[0];
+}
+
+function groupByCardId(cardsData) {
+  const groups = new Map();
+  for (const card of cardsData) {
+    const id = card.card_set_id;
+    if (!id) continue;
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(card);
+  }
+  return groups;
+}
+
+function mergeRowsByPrinting(rows) {
+  const byPrinting = new Map();
+  for (const row of rows) {
+    const printing = derivePrinting(row.card_name);
+    const existing = byPrinting.get(printing);
+    if (!existing) {
+      byPrinting.set(printing, row);
+      continue;
+    }
+
+    const currentHasImage = !!row.card_image;
+    const existingHasImage = !!existing.card_image;
+    if (currentHasImage && !existingHasImage) {
+      byPrinting.set(printing, row);
+    }
+  }
+  return byPrinting;
+}
+
+// ------------------------------------------------------------------
+// Sets
+// ------------------------------------------------------------------
 async function fetchAndUpsertSets() {
   const optcgurl = "https://www.optcgapi.com/api/allSets/";
   try {
@@ -82,57 +152,94 @@ let missedImages = [];
 let uploadFailures = [];
 let uploadSuccesses = new Set();
 
-async function processCardImage(card_id, set_id, source_url, retries = 3) {
-  if (!source_url) {
-    missedImages.push({ card_id, reason: "No source URL" });
-    return { success: false, card_id };
+async function storageFileExists(setId, fileName) {
+  const { data: existingFiles, error: listError } = await supabase.storage
+    .from(BUCKET_NAME)
+    .list(setId, { search: fileName });
+
+  if (listError) {
+    console.warn(`⚠️  List error for ${setId}/${fileName}:`, listError.message);
+    return false;
   }
 
-  const fileName = `${card_id}.png`;
-  const filePath = `${set_id}/${fileName}`;
+  return existingFiles && existingFiles.length > 0;
+}
+
+function getDeterministicPublicUrl(setId, storageFileName) {
+  const { data } = supabase.storage
+    .from(BUCKET_NAME)
+    .getPublicUrl(`${setId}/${storageFileName}`);
+  return data.publicUrl;
+}
+
+async function processVariantImage(
+  { variationsId, cardId, setId, sourceUrl, printing },
+  { forceImages = false, skipUpload = false } = {},
+  retries = 3,
+) {
+  if (skipUpload) {
+    const fileName = toStorageFileName(variationsId);
+    if (await storageFileExists(setId, fileName)) {
+      uploadSuccesses.add(variationsId);
+      return { success: true, variationsId, publicUrl: getDeterministicPublicUrl(setId, fileName) };
+    }
+    if (printing === "normal" && (await storageFileExists(setId, `${cardId}.png`))) {
+      uploadSuccesses.add(variationsId);
+      return {
+        success: true,
+        variationsId,
+        publicUrl: getDeterministicPublicUrl(setId, `${cardId}.png`),
+      };
+    }
+    return { success: false, variationsId, publicUrl: null };
+  }
+
+  if (!sourceUrl) {
+    missedImages.push({ variationsId, reason: "No source URL" });
+    return { success: false, variationsId, publicUrl: null };
+  }
+
+  const fileName = toStorageFileName(variationsId);
+  const filePath = `${setId}/${fileName}`;
+  const legacyFileName = `${cardId}.png`;
+  const legacyPath = `${setId}/${legacyFileName}`;
+
+  if (!forceImages) {
+    if (await storageFileExists(setId, fileName)) {
+      uploadSuccesses.add(variationsId);
+      process.stdout.write(`ℹ️  Exists: ${filePath}\r`);
+      return {
+        success: true,
+        variationsId,
+        publicUrl: getDeterministicPublicUrl(setId, fileName),
+      };
+    }
+
+    if (printing === "normal" && (await storageFileExists(setId, legacyFileName))) {
+      uploadSuccesses.add(variationsId);
+      process.stdout.write(`ℹ️  Legacy exists: ${legacyPath}\r`);
+      return {
+        success: true,
+        variationsId,
+        publicUrl: getDeterministicPublicUrl(setId, legacyFileName),
+      };
+    }
+  }
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      // Check if it exists in storage already - FIXED: check array length
-      const { data: existingFiles, error: listError } = await supabase.storage
-        .from(BUCKET_NAME)
-        .list(set_id, {
-          search: fileName,
-        });
-
-      if (listError) {
-        console.warn(`⚠️  List error for ${filePath}:`, listError.message);
-      }
-
-      // FIXED: Check if array has items, not just if data is truthy
-      if (existingFiles && existingFiles.length > 0) {
-        // Verify the file actually exists by trying to get its public URL
-        const { data: urlData } = supabase.storage
-          .from(BUCKET_NAME)
-          .getPublicUrl(filePath);
-
-        if (urlData?.publicUrl) {
-          uploadSuccesses.add(card_id);
-          process.stdout.write(`ℹ️  Exists: ${filePath}\r`);
-          return { success: true, card_id };
-        }
-      }
-
-      // Download from OPTCG API source with timeout
-      const response = await axios.get(source_url, {
+      const response = await axios.get(sourceUrl, {
         responseType: "arraybuffer",
-        timeout: 15000, // 15 second timeout
-        maxContentLength: 5 * 1024 * 1024, // 5MB max
+        timeout: 15000,
+        maxContentLength: 5 * 1024 * 1024,
       });
 
       const fileBuffer = Buffer.from(response.data);
-
       if (fileBuffer.length === 0) {
         throw new Error("Downloaded file is empty");
       }
 
-      // Upload to Supabase Storage
-      const { data: uploadData, error: uploadError } = await supabase.storage
+      const { error: uploadError } = await supabase.storage
         .from(BUCKET_NAME)
         .upload(filePath, fileBuffer, {
           contentType: "image/png",
@@ -143,84 +250,84 @@ async function processCardImage(card_id, set_id, source_url, retries = 3) {
         throw uploadError;
       }
 
-      // Verify upload succeeded by checking file exists
-      const { data: verifyFiles } = await supabase.storage
-        .from(BUCKET_NAME)
-        .list(set_id, { search: fileName });
-
-      if (!verifyFiles || verifyFiles.length === 0) {
+      if (!(await storageFileExists(setId, fileName))) {
         throw new Error(
           "Upload verification failed - file not found after upload",
         );
       }
 
-      uploadSuccesses.add(card_id);
+      uploadSuccesses.add(variationsId);
       process.stdout.write(`✅ Uploaded: ${filePath}\r`);
-      return { success: true, card_id };
+      return {
+        success: true,
+        variationsId,
+        publicUrl: getDeterministicPublicUrl(setId, fileName),
+      };
     } catch (error) {
       if (attempt < retries - 1) {
-        // Retry with exponential backoff
         const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
         process.stdout.write(
-          `⚠️  Retry ${attempt + 1}/${retries - 1} for ${card_id} in ${delay}ms...\r`,
+          `⚠️  Retry ${attempt + 1}/${retries - 1} for ${variationsId} in ${delay}ms...\r`,
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
       } else {
-        // Final failure
         console.error(
-          `\n❌ Failed image for ${card_id} after ${retries} attempts:`,
+          `\n❌ Failed image for ${variationsId} after ${retries} attempts:`,
           error.message,
         );
         uploadFailures.push({
-          card_id,
-          set_id,
-          source_url,
+          variationsId,
+          cardId,
+          setId,
+          source_url: sourceUrl,
           error: error.message,
         });
-        return { success: false, card_id };
+        return { success: false, variationsId, publicUrl: null };
       }
     }
   }
 
-  return { success: false, card_id };
+  return { success: false, variationsId, publicUrl: null };
 }
 
-async function syncImagesToStorage(cards) {
-  console.log(`\n🖼️  Starting Image Sync for ${cards.length} cards...`);
+async function syncVariantImages(variantRows, { forceImages = false, skipUpload = false } = {}) {
+  console.log(`\n🖼️  Starting Variant Image Sync for ${variantRows.length} rows...`);
 
-  const batchSize = 20; // Concurrent uploads
-  const results = [];
+  const imageUrlByVariationId = new Map();
+  const batchSize = 20;
+
   try {
-    for (let i = 0; i < cards.length; i += batchSize) {
-      const batch = cards.slice(i, i + batchSize);
-
-      // Process batch with proper error handling
+    for (let i = 0; i < variantRows.length; i += batchSize) {
+      const batch = variantRows.slice(i, i + batchSize);
       const batchResults = await Promise.allSettled(
-        batch.map((card) =>
-          processCardImage(card.card_set_id, card.set_id, card.card_image),
+        batch.map((variant) =>
+          processVariantImage(variant, { forceImages, skipUpload }),
         ),
       );
 
-      results.push(...batchResults);
+      for (const result of batchResults) {
+        if (result.status === "fulfilled" && result.value.success && result.value.publicUrl) {
+          imageUrlByVariationId.set(result.value.variationsId, result.value.publicUrl);
+        }
+      }
 
-      const progress = Math.round(((i + batch.length) / cards.length) * 100);
+      const progress = Math.round(((i + batch.length) / variantRows.length) * 100);
       process.stdout.write(`   ↳ Image Sync Progress: ${progress}% \r`);
 
-      // Small delay between batches to avoid rate limiting
-      if (i + batchSize < cards.length) {
+      if (i + batchSize < variantRows.length) {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
     }
 
     console.log(`\n\n📊 Image Sync Summary:`);
-    console.log(`   ✅ Successful uploads: ${uploadSuccesses.size}`);
+    console.log(`   ✅ Successful uploads/exists: ${uploadSuccesses.size}`);
     console.log(`   ⚠️  Missing source URLs: ${missedImages.length}`);
     console.log(`   ❌ Upload failures: ${uploadFailures.length}`);
 
     if (uploadFailures.length > 0) {
       console.log(`\n⚠️  Failed uploads details:`);
       uploadFailures.slice(0, 10).forEach((fail) => {
-        console.log(`   - ${fail.card_id}: ${fail.error}`);
+        console.log(`   - ${fail.variationsId}: ${fail.error}`);
       });
       if (uploadFailures.length > 10) {
         console.log(`   ... and ${uploadFailures.length - 10} more`);
@@ -229,127 +336,172 @@ async function syncImagesToStorage(cards) {
   } catch (error) {
     console.error("❌ Error during image sync:", error.message);
   }
-}
-// sets url to supabase storage location
-function getDeterministicPublicUrl(set_id, card_id) {
-  const { data } = supabase.storage
-    .from(BUCKET_NAME)
-    .getPublicUrl(`${set_id}/${card_id}.png`);
-  return data.publicUrl;
+
+  return imageUrlByVariationId;
 }
 
-//TODO: Fetch & Upsert Cards:
-
-async function fetchAndUpsertCards() {
+// ------------------------------------------------------------------
+// Cards + Variations
+// ------------------------------------------------------------------
+async function fetchAllOptcgCards() {
   const optcgurl = "https://www.optcgapi.com/api/allSetCards/";
-  try {
-    console.log("Fetching cards from OPTCG API...");
-    const AllCards = await fetch(optcgurl);
-    if (AllCards.ok) {
-      const cardsData = await AllCards.json();
+  console.log("Fetching cards from OPTCG API...");
+  const AllCards = await fetch(optcgurl);
+  if (!AllCards.ok) {
+    throw new Error(`OPTCG API error: ${AllCards.status}`);
+  }
+  return AllCards.json();
+}
 
-      // 1. Deduplicate with priority for valid images
-      const uniqueCardsMap = new Map();
-      cardsData.forEach((card) => {
-        const id = card.card_set_id;
-        if (!id) return;
+function buildCardAndVariationRecords(cardsData) {
+  const groups = groupByCardId(cardsData);
+  const dbCards = [];
+  const dbVariations = [];
+  const variantImageJobs = [];
 
-        if (!uniqueCardsMap.has(id)) {
-          // New entry
-          uniqueCardsMap.set(id, card);
-        } else {
-          // Conflict: Decide who wins
-          const existing = uniqueCardsMap.get(id);
+  for (const [cardId, rows] of groups) {
+    const canonical = pickCanonicalRow(rows);
+    const mergedByPrinting = mergeRowsByPrinting(rows);
 
-          // Priority 1: Has Image vs No Image
-          const currentHasImage = !!card.card_image;
-          const existingHasImage = !!existing.card_image;
+    dbCards.push({
+      card_id: cardId,
+      name: canonical.card_name,
+      set_id: canonical.set_id,
+      rarity: canonical.rarity,
+      cost: cleanInt(canonical.card_cost),
+      power: cleanInt(canonical.card_power),
+      colour: canonical.card_color,
+      attribute: canonical.attribute,
+      effect: canonical.card_text,
+      card_type: canonical.card_type,
+      sub_type: canonical.sub_types,
+      life: cleanInt(canonical.life),
+      counter: cleanInt(canonical.counter_amount),
+      image_url: null,
+    });
 
-          if (currentHasImage && !existingHasImage) {
-            uniqueCardsMap.set(id, card);
-          }
-          // Priority 2: If both have images (or both don't), prefer the one WITHOUT "Parallel" or "Reprint" in name
-          // (This helps get the base art for the base ID)
-          else if (currentHasImage === existingHasImage) {
-            const currentIsClean =
-              !card.card_name.includes("Parallel") &&
-              !card.card_name.includes("Reprint");
-            const existingIsClean =
-              !existing.card_name.includes("Parallel") &&
-              !existing.card_name.includes("Reprint");
-
-            if (currentIsClean && !existingIsClean) {
-              uniqueCardsMap.set(id, card);
-            }
-          }
-        }
+    for (const [printing, row] of mergedByPrinting) {
+      const variationsId = buildVariationsId(cardId, printing);
+      dbVariations.push({
+        variations_id: variationsId,
+        card_id: cardId,
+        printing,
+        version: printing,
+        image_url: null,
+        note: null,
+        justtcg_variant_id: null,
+        tcgplayer_id: null,
       });
-      const uniqueCardsData = Array.from(uniqueCardsMap.values());
-      // 2. PREPARATION: Fill the bucket (The separate function)
-      await syncImagesToStorage(uniqueCardsData);
 
-      // 3. Map Data - Only set image_url if upload was successful
-      const dbCards = uniqueCardsData.map((card) => ({
-        card_id: card.card_set_id,
-        name: card.card_name,
-        set_id: card.set_id,
-        rarity: card.rarity,
-        cost: cleanInt(card.card_cost),
-        power: cleanInt(card.card_power),
-        colour: card.card_color,
-        attribute: card.attribute,
-        effect: card.card_text,
-        card_type: card.card_type,
-        sub_type: card.sub_types,
-        life: cleanInt(card.life),
-        counter: cleanInt(card.counter_amount),
-        // Only set image_url if the upload was successful
-        image_url: uploadSuccesses.has(card.card_set_id)
-          ? getDeterministicPublicUrl(card.set_id, card.card_set_id)
-          : null,
-      }));
-
-      // 4. Upsert in batches (Database logic only)
-      const batchSize = 1000;
-      for (let i = 0; i < dbCards.length; i += batchSize) {
-        const batch = dbCards.slice(i, i + batchSize);
-        console.log(`Upserting DB batch ${Math.floor(i / batchSize) + 1}...`);
-
-        const { error } = await supabase
-          .from("cards")
-          .upsert(batch, { onConflict: "card_id" });
-
-        if (error) {
-          console.error(
-            "❌ Batch Upsert Error:",
-            JSON.stringify(error, null, 2),
-          );
-        }
-      }
-      console.log("✅ Card sync complete.");
+      variantImageJobs.push({
+        variationsId,
+        cardId,
+        setId: row.set_id,
+        sourceUrl: row.card_image,
+        printing,
+      });
     }
+  }
+
+  return { dbCards, dbVariations, variantImageJobs };
+}
+
+async function upsertInBatches(table, rows, onConflict) {
+  const batchSize = 1000;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    console.log(`Upserting ${table} batch ${Math.floor(i / batchSize) + 1}...`);
+    const { error } = await supabase.from(table).upsert(batch, { onConflict });
+    if (error) {
+      console.error(
+        `❌ ${table} batch upsert error:`,
+        JSON.stringify(error, null, 2),
+      );
+    }
+  }
+}
+
+async function fetchAndUpsertCards({ forceImages = false, skipImages = false } = {}) {
+  try {
+    const cardsData = await fetchAllOptcgCards();
+    const { dbCards, dbVariations, variantImageJobs } =
+      buildCardAndVariationRecords(cardsData);
+
+    console.log(
+      `Grouped ${cardsData.length} OPTCG rows → ${dbCards.length} cards, ${dbVariations.length} variations`,
+    );
+
+    const imageUrlByVariationId = await syncVariantImages(variantImageJobs, {
+      forceImages,
+      skipUpload: skipImages,
+    });
+
+    for (const variation of dbVariations) {
+      const url = imageUrlByVariationId.get(variation.variations_id);
+      if (url) {
+        variation.image_url = url;
+      }
+    }
+
+    for (const card of dbCards) {
+      const normalUrl = imageUrlByVariationId.get(`${card.card_id}:normal`);
+      if (normalUrl) {
+        card.image_url = normalUrl;
+      }
+    }
+
+    await upsertInBatches("cards", dbCards, "card_id");
+    await upsertInBatches("variations", dbVariations, "variations_id");
+
+    console.log("✅ Card + variation sync complete.");
   } catch (error) {
     console.error("❌ Error in fetchAndUpsertCards:", error.message);
   }
 }
 
+// ------------------------------------------------------------------
+// JustTCG pricing (Phase 2 stub — only with --sync-prices)
+// ------------------------------------------------------------------
+async function syncPricesFromJustTCG() {
+  getJustTCGClient();
+  console.log(
+    "ℹ️  JustTCG price sync is deferred to Phase 2. Client initialized; no pricing writes yet.",
+  );
+}
+
+// ------------------------------------------------------------------
+// Main
+// ------------------------------------------------------------------
 async function main() {
   const args = process.argv.slice(2);
+  const setsOnly = args.includes("--sets-only");
+  const cardsOnly = args.includes("--cards-only");
   const forceImages = args.includes("--force-images");
-
-  // Basic Routing
-  // In the future, we can check for --target=market, etc.
-  // Default behavior: Run Base Layer
+  const syncPrices = args.includes("--sync-prices");
 
   console.log("🚀 Starting Ingestion Pipeline...");
   console.log("--------------------------------");
   console.log(`Target: Base Layer (OPTCG)`);
+  console.log(`Sets Only: ${setsOnly ? "YES" : "NO"}`);
+  console.log(`Cards Only: ${cardsOnly ? "YES" : "NO"}`);
   console.log(`Force Images: ${forceImages ? "YES" : "NO"}`);
+  console.log(`Sync Prices: ${syncPrices ? "YES" : "NO"}`);
   console.log("--------------------------------");
 
-  await fetchAndUpsertSets();
-  await fetchAndUpsertCards({ forceImages });
+  if (setsOnly) {
+    await fetchAndUpsertSets();
+  } else if (cardsOnly) {
+    await fetchAndUpsertCards({ forceImages, skipImages: !forceImages });
+  } else {
+    await fetchAndUpsertSets();
+    await fetchAndUpsertCards({ forceImages, skipImages: false });
+  }
+
+  if (syncPrices) {
+    await syncPricesFromJustTCG();
+  }
 
   console.log("\n✨ Pipeline Execution Finished.");
 }
+
 main();

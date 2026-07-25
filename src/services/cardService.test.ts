@@ -5,6 +5,7 @@
  * - searchTerm: case-insensitive name search
  * - colour: exact colour match
  * - card_id: exact card ID match
+ * - card_type, attribute, rarity, set_id, leadersOnly: detail filters
  * - limit: pagination limit
  * - offset: pagination offset
  * 
@@ -368,6 +369,239 @@ await runTest("SearchCards should work with all valid colours", async () => {
   // At least some colours should have cards
   const totalCards = Object.values(colourResults).reduce((sum, count) => sum + count, 0);
   assert(totalCards > 0, "At least one colour should have cards in the database");
+});
+
+// ============================================================================
+// TEST: card_id pattern search via searchTerm (exact match, e.g. OP05-060)
+// ============================================================================
+await runTest("SearchCards with card ID pattern should exact-match by card_id", async () => {
+  const targetCardId = "OP05-060";
+  const { data } = await cardService.SearchCards({
+    searchTerm: targetCardId,
+    limit: 10,
+  });
+
+  assert(Array.isArray(data), "Should return an array");
+
+  if (data.length > 0) {
+    assert(
+      data.length === 1,
+      `Exact card ID search should return 1 card, got ${data.length}`,
+    );
+    assert(
+      data[0].card_id === targetCardId,
+      `Should find card with ID ${targetCardId}, got ${data[0].card_id}`,
+    );
+    console.log(`   Found card: ${data[0].name} (${data[0].card_id})`);
+  } else {
+    console.log(
+      `   No card found with ID ${targetCardId} (may not exist in DB yet — run seed after migration)`,
+    );
+  }
+});
+
+// ============================================================================
+// TEST: leadersOnly filter
+// ============================================================================
+await runTest("SearchCards with leadersOnly should return only Leader cards", async () => {
+  const { data } = await cardService.SearchCards({
+    leadersOnly: true,
+    limit: 30,
+  });
+
+  assert(Array.isArray(data), "Should return an array");
+
+  if (data.length > 0) {
+    data.forEach((card: Card) => {
+      assert(
+        card.card_type === "Leader",
+        `Card "${card.name}" should be Leader, got "${card.card_type}"`,
+      );
+    });
+    console.log(`   Found ${data.length} Leader cards`);
+  } else {
+    console.log(`   No Leader cards found (database may be empty)`);
+  }
+});
+
+// ============================================================================
+// TEST: card_type filter
+// ============================================================================
+await runTest("SearchCards with card_type filter should return matching type", async () => {
+  const targetType = "Character";
+  const { data } = await cardService.SearchCards({
+    card_type: targetType,
+    limit: 30,
+  });
+
+  assert(Array.isArray(data), "Should return an array");
+
+  if (data.length > 0) {
+    data.forEach((card: Card) => {
+      assert(
+        card.card_type === targetType,
+        `Card "${card.name}" should be ${targetType}, got "${card.card_type}"`,
+      );
+    });
+    console.log(`   Found ${data.length} ${targetType} cards`);
+  } else {
+    console.log(`   No ${targetType} cards found`);
+  }
+});
+
+// ============================================================================
+// TEST: attribute filter
+// ============================================================================
+await runTest("SearchCards with attribute filter should return matching attribute", async () => {
+  const targetAttribute = "Strike";
+  const { data } = await cardService.SearchCards({
+    attribute: targetAttribute,
+    limit: 30,
+  });
+
+  assert(Array.isArray(data), "Should return an array");
+
+  if (data.length > 0) {
+    data.forEach((card: Card) => {
+      assert(
+        card.attribute === targetAttribute,
+        `Card "${card.name}" attribute should be "${targetAttribute}", got "${card.attribute}"`,
+      );
+    });
+    console.log(`   Found ${data.length} ${targetAttribute} cards`);
+  } else {
+    console.log(`   No ${targetAttribute} cards found`);
+  }
+});
+
+// ============================================================================
+// TEST: rarity filter
+// ============================================================================
+await runTest("SearchCards with rarity filter should return matching rarity", async () => {
+  const targetRarity = "SR";
+  const { data } = await cardService.SearchCards({
+    rarity: targetRarity,
+    limit: 30,
+  });
+
+  assert(Array.isArray(data), "Should return an array");
+
+  if (data.length > 0) {
+    data.forEach((card: Card) => {
+      assert(
+        card.rarity === targetRarity,
+        `Card "${card.name}" rarity should be "${targetRarity}", got "${card.rarity}"`,
+      );
+    });
+    console.log(`   Found ${data.length} ${targetRarity} cards`);
+  } else {
+    console.log(`   No ${targetRarity} cards found`);
+  }
+});
+
+// ============================================================================
+// TEST: set_id filter
+// ============================================================================
+await runTest("SearchCards with set_id filter should return matching set", async () => {
+  const targetSet = "OP05";
+  const { data } = await cardService.SearchCards({
+    set_id: targetSet,
+    limit: 30,
+  });
+
+  assert(Array.isArray(data), "Should return an array");
+
+  if (data.length > 0) {
+    data.forEach((card: Card) => {
+      assert(
+        card.set_id === targetSet,
+        `Card "${card.name}" set should be "${targetSet}", got "${card.set_id}"`,
+      );
+    });
+    console.log(`   Found ${data.length} cards from ${targetSet}`);
+  } else {
+    console.log(`   No cards found for set ${targetSet}`);
+  }
+});
+
+// ============================================================================
+// TEST: Combined filters (searchTerm + colour + card_type)
+// ============================================================================
+await runTest("SearchCards with multiple detail filters combined", async () => {
+  const { data } = await cardService.SearchCards({
+    colour: "Red",
+    card_type: "Character",
+    limit: 30,
+  });
+
+  assert(Array.isArray(data), "Should return an array");
+
+  if (data.length > 0) {
+    data.forEach((card: Card) => {
+      assert(card.colour === "Red", `Card "${card.name}" should be Red`);
+      assert(
+        card.card_type === "Character",
+        `Card "${card.name}" should be Character`,
+      );
+    });
+    console.log(`   Found ${data.length} Red Character cards`);
+  } else {
+    console.log(`   No Red Character cards found (valid if none exist)`);
+  }
+});
+
+// ============================================================================
+// TEST: getCardWithVariations returns multiple printings for parallel cards
+// ============================================================================
+await runTest("getCardWithVariations should return variations for parallel card", async () => {
+  const targetCardId = "OP05-060";
+  const card = await cardService.getCardWithVariations(targetCardId);
+
+  if (!card) {
+    console.log(
+      `   Card ${targetCardId} not found (may not exist in DB yet — run seed after migration)`,
+    );
+    return;
+  }
+
+  assert(card.card_id === targetCardId, `Expected card_id ${targetCardId}`);
+  assert(Array.isArray(card.variations), "Should include variations array");
+  assert(
+    card.variations!.length >= 1,
+    "Should have at least one variation row",
+  );
+
+  const printings = card.variations!.map((v) => v.printing);
+  console.log(`   Variations (${printings.length}): ${printings.join(", ")}`);
+
+  if (card.variations!.length >= 2) {
+    assert(
+      printings.includes("normal") || printings.includes("parallel"),
+      "Parallel card should include normal and/or parallel printings",
+    );
+  }
+});
+
+// ============================================================================
+// TEST: getVariationById
+// ============================================================================
+await runTest("getVariationById should fetch a single variation", async () => {
+  const variationsId = "OP05-060:normal";
+  const variation = await cardService.getVariationById(variationsId);
+
+  if (!variation) {
+    console.log(
+      `   Variation ${variationsId} not found (may not exist in DB yet — run seed after migration)`,
+    );
+    return;
+  }
+
+  assert(
+    variation.variations_id === variationsId,
+    `Expected variations_id ${variationsId}`,
+  );
+  assert(variation.card_id === "OP05-060", "Variation should belong to OP05-060");
+  console.log(`   Found variation: ${variation.printing} (${variation.variations_id})`);
 });
 
 // ============================================================================
